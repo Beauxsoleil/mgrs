@@ -15,7 +15,7 @@ async function run(failTiles=false){
  elements.printMode.value='view';elements.printScale.value='fit';elements.base.value='topo';elements.msg.textContent='';elements.gridT.checked=true;
  const body=new El(),head=new El();const document={body,head,activeElement:new El(),getElementById:id=>elements[id],createElement:tag=>new El(tag),querySelectorAll:()=>[]};
  class Image{set src(v){if(v)queueMicrotask(()=>{if(failTiles)this.onerror?.();else this.onload?.()})}}
- const context={document,Image,AbortController,DOMException,console,setTimeout,clearTimeout,queueMicrotask,Date,Math,Number,Error,Promise,window:{addEventListener(){},print(){printed++}},map:{on(){},getBounds:()=>({getWest:()=>-115,getEast:()=>-114,getSouth:()=>42,getNorth:()=>43})},wps:[],legs:[],prof:[],BASES:{topo:['https://example.test/{z}/{x}/{y}']},fmtMGRS:()=> '11T TEST',updateHud(){}};
+ const context={document,Image,AbortController,DOMException,console,setTimeout,clearTimeout,queueMicrotask,Date,Math,Number,Error,Promise,window:{MGRSPrintLegend:require('../print-legend.js'),addEventListener(){},print(){printed++}},map:{on(){},getBounds:()=>({getWest:()=>-115,getEast:()=>-114,getSouth:()=>42,getNorth:()=>43})},wps:[],legs:[],prof:[],BASES:{topo:['https://example.test/{z}/{x}/{y}']},fmtMGRS:()=> '11T TEST',updateHud(){}};
  vm.createContext(context);
  const app=fs.readFileSync(path.join(__dirname,'../index.html'),'utf8');vm.runInContext(app.slice(app.indexOf('const A_='),app.indexOf('/* ---------- MGRS grid overlay')),context);
  vm.runInContext(source,context);
@@ -23,7 +23,7 @@ async function run(failTiles=false){
  assert.equal(elements.printExport.disabled,false);
  const preview=body.children[0];assert.equal(preview.hidden,false);
  if(failTiles){assert.match(elements.printContent.textContent,/could not load/);assert.equal(elements.printNow.onclick,undefined);return;}
- assert.match(elements.printContent.innerHTML,/MGRS FIELD MAP/);assert.match(elements.printContent.innerHTML,/Magnetic declination unavailable/);assert.match(elements.printContent.innerHTML,/USGS/);assert.match(elements.printContent.innerHTML,/km grid/);assert(draws.length>0&&draws.length<=100);assert.equal(elements.printNow.disabled,false);elements.printNow.onclick();assert.equal(printed,1);
+ assert.match(elements.printContent.innerHTML,/MGRS FIELD MAP/);assert.match(elements.printContent.innerHTML,/Magnetic declination unavailable/);assert.match(elements.printContent.innerHTML,/USGS/);assert.match(elements.printContent.innerHTML,/km grid/);assert(draws.length>0&&draws.length<=101);assert.equal(elements.printNow.disabled,false);elements.printNow.onclick();assert.equal(printed,1);
  elements.printScale.value='50000';await elements.printExport.onclick();assert.match(elements.printStatus.textContent,/does not fit/);
  elements.printMode.value='route';await elements.printExport.onclick();assert.match(elements.printStatus.textContent,/No route yet/);
  elements.printMode.value='selection';await elements.printExport.onclick();assert.match(elements.printStatus.textContent,/two opposite corners/);
