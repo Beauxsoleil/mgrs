@@ -1,8 +1,8 @@
-const SHELL='shell-v2',TILES='tiles-v1';
-const ASSETS=['./','index.html','maplibre-gl.js','maplibre-gl.css','mgrs.js','wmm2025.js','print-export.js','manifest.webmanifest'];
+const SHELL='shell-v3',TILES='tiles-v1';
+const ASSETS=['./','index.html','maplibre-gl.js','maplibre-gl.css','mgrs.js','wmm2025.js','print-export.js','field-ui.css','field-ui.js','manifest.webmanifest'];
 const isTile=u=>/basemap\.nationalmap\.gov|tile\.openstreetmap\.org|elevation-tiles-prod/.test(u.hostname+u.pathname);
 self.addEventListener('install',e=>{e.waitUntil(caches.open(SHELL).then(c=>c.addAll(ASSETS)).then(()=>self.skipWaiting()))});
-self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==SHELL&&k!==TILES).map(k=>caches.delete(k)))).then(()=>self.clients.claim()))});
+self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k.startsWith('shell-')&&k!==SHELL).map(k=>caches.delete(k)))).then(()=>self.clients.claim()))});
 self.addEventListener('fetch',e=>{
   const req=e.request;if(req.method!=='GET')return;
   const u=new URL(req.url);
