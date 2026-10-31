@@ -50,6 +50,7 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
     <input id="ex" type="range" min="1" max="3" step="0.1" value="1.4" aria-label="Terrain exaggeration">
   </div>
   <div class="row"><label style="margin:0;align-self:center"><input id="gridT" type="checkbox" checked> MGRS grid</label><span style="flex:1"></span><label style="margin:0;align-self:center">Pace <select id="pace"><option value="1">Normal</option><option value="1.3">Slow (pack)</option><option value="0.8">Fast</option></select></label></div>
+  <div class="row"><label style="margin:0;align-self:center"><input id="auto" type="checkbox" checked> Auto-route</label><span style="flex:1"></span><label style="margin:0;align-self:center">Max slope <select id="maxs"><option value="25">25°</option><option value="30">30°</option><option value="35" selected>35°</option><option value="40">40°</option><option value="45">45°</option></select></label></div>
   <ul id="wps" class="mono"></ul>
   <div id="stats">
     <div><small>Distance</small><strong id="sD">0 km</strong></div>
@@ -58,8 +59,9 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
     <div><small>Loss</small><strong id="sL">0 m</strong></div>
   </div>
   <canvas id="prof" aria-label="Elevation profile"></canvas>
+  <div id="msg" class="hint" role="status"></div>
   <div class="row" style="margin-top:8px"><button id="undo">Undo</button><button id="clear">Clear</button><button id="gpx" class="p">Export GPX</button></div>
-  <p class="hint">Click the map to add waypoints. Drag a pin to move it, double-click to delete. Right-drag or Ctrl-drag to tilt and rotate. Time uses Tobler’s hiking function.</p>
+  <p class="hint">Click the map to add waypoints. Drag a pin to move it, double-click to delete. Right-drag or Ctrl-drag to tilt and rotate. Auto-route finds the fastest path between waypoints using Tobler’s hiking function and avoids slopes above your limit. It reads slope only, so it does not yet avoid lakes or rivers.</p>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
@@ -156,37 +158,137 @@ $('ex').oninput=()=>{map.setTerrain({source:'dem',exaggeration:ex()});map.once('
 $('base').onchange=e=>map.getSource('base').setTiles(BASES[e.target.value]);
 
 /* ---------- Waypoints & route ---------- */
-let wps=[];
+let wps=[],legs=[],token=0,retries=0,prof=[];
+const legCache=new Map();
 function hav(a,b){const R=6371008.8,dLa=rad(b[1]-a[1]),dLo=rad(b[0]-a[0]);
   const x=Math.sin(dLa/2)**2+Math.cos(rad(a[1]))*Math.cos(rad(b[1]))*Math.sin(dLo/2)**2;return 2*R*Math.asin(Math.sqrt(x))}
 function addWP(lng,lat){
   const el=document.createElement('div');el.className='pin';
   const mk=new maplibregl.Marker({element:el,draggable:true}).setLngLat([lng,lat]).addTo(map);
-  mk.on('dragend',update);
+  mk.on('dragend',changed);
   el.addEventListener('click',ev=>ev.stopPropagation());
-  el.addEventListener('dblclick',ev=>{ev.stopPropagation();mk.remove();wps=wps.filter(w=>w!==mk);update()});
-  wps.push(mk);update();
+  el.addEventListener('dblclick',ev=>{ev.stopPropagation();mk.remove();wps=wps.filter(w=>w!==mk);changed()});
+  wps.push(mk);changed();
 }
 map.on('click',e=>addWP(e.lngLat.lng,e.lngLat.lat));
-let prof=[];
-let retries=0;
+const setMsg=t=>{$('msg').textContent=t||''};
+function changed(){computeLegs()}
+
+/* Terrain-aware routing: A* over a DEM grid built from Terrarium tiles */
+const tick=()=>new Promise(r=>setTimeout(r,0));
+class Heap{constructor(){this.k=[];this.v=[]}
+  get size(){return this.k.length}
+  push(key,val){let i=this.k.length;this.k.push(key);this.v.push(val);while(i>0){const p=(i-1)>>1;if(this.k[p]<=key)break;this.k[i]=this.k[p];this.v[i]=this.v[p];i=p}this.k[i]=key;this.v[i]=val}
+  pop(){const rv=this.v[0],lk=this.k.pop(),lv=this.v.pop(),n=this.k.length;
+    if(n){let i=0;for(;;){let c=2*i+1;if(c>=n)break;if(c+1<n&&this.k[c+1]<this.k[c])c++;if(this.k[c]>=lk)break;this.k[i]=this.k[c];this.v[i]=this.v[c];i=c}this.k[i]=lk;this.v[i]=lv}
+    return rv}}
+function dp(P,tol){
+  const keep=new Uint8Array(P.length);keep[0]=keep[P.length-1]=1;const st=[[0,P.length-1]];
+  while(st.length){const[a,b]=st.pop();let md=0,mi=-1;const[ax,ay]=P[a],[bx,by]=P[b],dx=bx-ax,dy=by-ay,L=Math.hypot(dx,dy)||1;
+    for(let i=a+1;i<b;i++){const d=Math.abs((P[i][0]-ax)*dy-(P[i][1]-ay)*dx)/L;if(d>md){md=d;mi=i}}
+    if(md>tol){keep[mi]=1;st.push([a,mi],[mi,b])}}
+  return P.filter((_,i)=>keep[i]);
+}
+async function routeLeg(a,b,maxS,stale){
+  const mid=(a[1]+b[1])/2;
+  const wx=(lng,z)=>(lng+180)/360*256*2**z;
+  const wy=(lat,z)=>{const s=Math.sin(rad(lat));return(.5-Math.log((1+s)/(1-s))/(4*Math.PI))*256*2**z};
+  const mlng=Math.max(.02,Math.abs(a[0]-b[0])*.35),mlat=Math.max(.015,Math.abs(a[1]-b[1])*.35);
+  const lo=[Math.min(a[0],b[0])-mlng,Math.min(a[1],b[1])-mlat],hi=[Math.max(a[0],b[0])+mlng,Math.max(a[1],b[1])+mlat];
+  let z=13,x0,x1,y0,y1;
+  for(;z>=8;z--){x0=Math.floor(wx(lo[0],z));x1=Math.ceil(wx(hi[0],z));y0=Math.floor(wy(hi[1],z));y1=Math.ceil(wy(lo[1],z));if((x1-x0)*(y1-y0)<=1.2e6)break}
+  if(z<8)throw new Error('Leg too long for auto-route');
+  const W=x1-x0,H=y1-y0,tx0=Math.floor(x0/256),tx1=Math.floor((x1-1)/256),ty0=Math.floor(y0/256),ty1=Math.floor((y1-1)/256);
+  const cv=document.createElement('canvas');cv.width=(tx1-tx0+1)*256;cv.height=(ty1-ty0+1)*256;
+  const cx=cv.getContext('2d',{willReadFrequently:true});cx.imageSmoothingEnabled=false;
+  const jobs=[];
+  for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++)jobs.push((async()=>{
+    const r=await fetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`);
+    if(!r.ok)throw new Error('Elevation tile download failed');
+    const bm=await createImageBitmap(await r.blob(),{colorSpaceConversion:'none',premultiplyAlpha:'none'});
+    cx.drawImage(bm,(tx-tx0)*256,(ty-ty0)*256);
+  })());
+  await Promise.all(jobs);if(stale())throw new Error('stale');
+  const D=cx.getImageData(x0-tx0*256,y0-ty0*256,W,H).data,el=new Float32Array(W*H);
+  for(let i=0;i<W*H;i++)el[i]=D[4*i]*256+D[4*i+1]+D[4*i+2]/256-32768;
+  const cs=156543.03392*Math.cos(rad(mid))/2**z,ts=Math.tan(rad(maxS)),vmax=6/3.6;
+  const cl=(v,m)=>Math.min(m-1,Math.max(0,v));
+  const sx=cl(Math.floor(wx(a[0],z)-x0),W),sy=cl(Math.floor(wy(a[1],z)-y0),H),gx=cl(Math.floor(wx(b[0],z)-x0),W),gy=cl(Math.floor(wy(b[1],z)-y0),H);
+  const S=sy*W+sx,G=gy*W+gx,g=new Float32Array(W*H).fill(Infinity),par=new Int32Array(W*H).fill(-1),closed=new Uint8Array(W*H);
+  const DX=[1,-1,0,0,1,1,-1,-1],DY=[0,0,1,-1,1,-1,1,-1],DD=[1,1,1,1,1.41421,1.41421,1.41421,1.41421];
+  const hf=i=>Math.hypot(i%W-gx,((i/W)|0)-gy)*cs/vmax,heap=new Heap();
+  g[S]=0;heap.push(hf(S),S);let it=0,found=false;
+  while(heap.size){
+    const u=heap.pop();if(closed[u])continue;closed[u]=1;
+    if(u===G){found=true;break}
+    if(++it%30000===0){await tick();if(stale())throw new Error('stale')}
+    const ux=u%W,uy=(u/W)|0,hu=el[u];
+    for(let k=0;k<8;k++){
+      const nx=ux+DX[k],ny=uy+DY[k];if(nx<0||ny<0||nx>=W||ny>=H)continue;
+      const v=ny*W+nx;if(closed[v])continue;
+      const dist=cs*DD[k],sl=(el[v]-hu)/dist,as=Math.abs(sl);if(as>ts)continue;
+      const c=dist/(vmax*Math.exp(-3.5*Math.abs(sl+.05)))*(1+Math.pow(as/ts,3)),ng=g[u]+c;
+      if(ng<g[v]){g[v]=ng;par[v]=u;heap.push(ng+hf(v),v)}
+    }
+  }
+  if(!found)throw new Error(`No route under ${maxS}° slope`);
+  let P=[];for(let i=G;i!==-1;i=par[i])P.push([i%W+.5,((i/W)|0)+.5]);P.reverse();
+  const Sm=dp(P,1.2),stepC=Math.max(1,30/cs),W0=256*2**z;
+  const ll=(x,y)=>[(x0+x)/W0*360-180,deg(Math.atan(Math.sinh(Math.PI*(1-2*(y0+y)/W0))))];
+  const bil=(x,y)=>{const fx=Math.min(W-1.001,Math.max(0,x-.5)),fy=Math.min(H-1.001,Math.max(0,y-.5)),i0=fx|0,j0=fy|0,tx=fx-i0,ty=fy-j0,i=j0*W+i0;
+    return el[i]*(1-tx)*(1-ty)+el[i+1]*tx*(1-ty)+el[i+W]*(1-tx)*ty+el[i+W+1]*tx*ty};
+  const out=[];
+  for(let i=0;i<Sm.length-1;i++){
+    const[ax,ay]=Sm[i],[bx,by]=Sm[i+1],n=Math.max(1,Math.round(Math.hypot(bx-ax,by-ay)/stepC));
+    for(let k=i?1:0;k<=n;k++){const f=k/n,x=ax+(bx-ax)*f,y=ay+(by-ay)*f;out.push({p:ll(x,y),h:bil(x,y)})}
+  }
+  if(out.length<2)out.push({...out[0]});
+  return{path:out};
+}
+async function computeLegs(){
+  const my=++token,n=Math.max(0,wps.length-1);
+  legs=new Array(n).fill(null);setMsg('');update();
+  if(!$('auto').checked||!n)return;
+  const pts=wps.map(m=>m.getLngLat().toArray()),ms=+$('maxs').value,notes=[],stale=()=>my!==token;
+  for(let i=0;i<n;i++){
+    const key=[pts[i],pts[i+1],ms].join('|');let r=legCache.get(key);
+    if(!r){
+      setMsg(`Routing leg ${i+1} of ${n}…`);
+      try{r=await routeLeg(pts[i],pts[i+1],ms,stale)}catch(e){if(e.message==='stale')return;r={err:e.message}}
+      if(r.path||/No route/.test(r.err))legCache.set(key,r);
+    }
+    if(stale())return;
+    if(r.path)legs[i]=r.path;else notes.push(`Leg ${i+1}: ${r.err} (straight line shown).`);
+    update(false);
+  }
+  setMsg(notes.join(' ')||'Auto-route complete.');
+}
+
 function update(user){
   if(user!==false)retries=0;
   wps.forEach((m,i)=>m.getElement().textContent=i+1);
   const pts=wps.map(m=>m.getLngLat().toArray());
-  map.getSource('route').setData(pts.length>1?{type:'Feature',geometry:{type:'LineString',coordinates:pts}}:E0());
   $('wps').innerHTML=pts.map((p,i)=>{const h=elev(new maplibregl.LngLat(p[0],p[1]));
     return`<li data-i="${i}"><span>${i+1}</span><span>${fmtMGRS(p[0],p[1])}</span><span style="margin-left:auto;color:var(--dim)">${h!=null?Math.round(h)+' m':''}</span></li>`}).join('');
   prof=[];let d=0,g=0,l=0,t=0,miss=false;const pace=+$('pace').value;
   for(let i=0;i<pts.length-1;i++){
-    const a=pts[i],b=pts[i+1],L=hav(a,b),n=Math.max(2,Math.min(200,Math.ceil(L/60)));
-    for(let k=(i?1:0);k<=n;k++){
-      const f=k/n,p=[a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f];
-      let h=elev(new maplibregl.LngLat(p[0],p[1]));if(h==null){miss=true;h=prof.length?prof[prof.length-1].h:0}
-      prof.push({d:d+L*f,h,p});
+    const a=pts[i],b=pts[i+1],leg=legs[i];
+    if(leg&&leg.length>1){
+      leg.forEach((q,k)=>{
+        if(k===0){if(i===0)prof.push({d,h:q.h,p:a});return}
+        const p=k===leg.length-1?b:q.p;d+=hav(prof[prof.length-1].p,p);prof.push({d,h:q.h,p});
+      });
+    }else{
+      const L=hav(a,b),n=Math.max(2,Math.min(200,Math.ceil(L/60)));
+      for(let k=(i?1:0);k<=n;k++){
+        const f=k/n,p=[a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f];
+        let h=elev(new maplibregl.LngLat(p[0],p[1]));if(h==null){miss=true;h=prof.length?prof[prof.length-1].h:0}
+        prof.push({d:d+L*f,h,p});
+      }
+      d+=L;
     }
-    d+=L;
   }
+  map.getSource('route').setData(prof.length>1?{type:'Feature',geometry:{type:'LineString',coordinates:prof.map(q=>q.p)}}:E0());
   const sm=prof.map((q,i)=>({...q,h:(prof[Math.max(0,i-1)].h+q.h+prof[Math.min(prof.length-1,i+1)].h)/3}));
   for(let i=1;i<sm.length;i++){
     const dz=sm[i].h-sm[i-1].h,dx=sm[i].d-sm[i-1].d;if(dx<=0)continue;
@@ -213,8 +315,9 @@ function drawProfile(s){
   x.fillText(Math.round(hi)+' m',4,10);x.fillText(Math.round(lo)+' m',4,h-3);
 }
 $('wps').onclick=e=>{const li=e.target.closest('li');if(li){map.flyTo({center:wps[li.dataset.i].getLngLat(),zoom:Math.max(map.getZoom(),13)})}};
-$('undo').onclick=()=>{const m=wps.pop();if(m)m.remove();update()};
-$('clear').onclick=()=>{wps.forEach(m=>m.remove());wps=[];update()};
+$('undo').onclick=()=>{const m=wps.pop();if(m)m.remove();changed()};
+$('clear').onclick=()=>{wps.forEach(m=>m.remove());wps=[];changed()};
+$('auto').onchange=changed;$('maxs').onchange=changed;
 $('pace').onchange=update;
 
 /* ---------- MGRS entry ---------- */
