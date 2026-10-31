@@ -52,7 +52,10 @@ $('printExport').onclick=async()=>{
   const zoom=Math.log2((W/maxW)*40075016.686*Math.cos(rad(c[1]))/512);
   printMap=new maplibregl.Map({container:host,style,center:c,zoom,pitch:0,bearing:0,interactive:false,attributionControl:false,preserveDrawingBuffer:true,fadeDuration:0});
   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Map tiles timed out. Try a cached area.')),20000);printMap.once('idle',()=>{clearTimeout(timer);resolve();});printMap.once('error',e=>{if(e.error)console.warn('Export map tile:',e.error.message)});});
-  const image=printMap.getCanvas().toDataURL('image/png');
+  const canvas=document.createElement('canvas');canvas.width=W;canvas.height=H;
+  const ctx=canvas.getContext('2d');ctx.drawImage(printMap.getCanvas(),0,0);
+  wps.forEach((wp,i)=>{const ll=wp.getLngLat(),p=printMap.project([ll.lng,ll.lat]);if(p.x<0||p.x>W||p.y<0||p.y>H)return;ctx.beginPath();ctx.arc(p.x,p.y,10,0,Math.PI*2);ctx.fillStyle='#f2a33a';ctx.fill();ctx.strokeStyle='#111';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle='#111';ctx.font='bold 12px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(String(i+1),p.x,p.y);});
+  const image=canvas.toDataURL('image/png');
   const d=diagram(c[1],c[0],decl);
   const mgrsText=typeof mgrs!=='undefined'?mgrs.forward(c,5):c.map(v=>v.toFixed(5)).join(', ');
   const escape=x=>String(x).replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
