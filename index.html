@@ -2,9 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Idaho 3D MGRS Route Planner</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<meta name="theme-color" content="#14201b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="MGRS Planner">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="maplibre-gl.css">
 <style>
 :root{--bg:#14201b;--ink:#e7e3d3;--dim:#93a198;--acc:#f2a33a;--line:#2b3d35}
 *{box-sizing:border-box}
@@ -22,6 +27,7 @@ input[type=range]{padding:0;flex:1;accent-color:var(--acc)}
 button{cursor:pointer}
 button:hover{border-color:var(--acc)}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+button.on{border-color:var(--acc);background:#2a3a2f}
 button.p{background:var(--acc);color:#1a1205;border-color:var(--acc);font-weight:600}
 label{color:var(--dim);font-size:12px;display:block;margin:2px 0 4px}
 #wps{list-style:none;margin:0 0 8px;padding:0;max-height:180px;overflow-y:auto}
@@ -34,16 +40,27 @@ label{color:var(--dim);font-size:12px;display:block;margin:2px 0 4px}
 canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);border-radius:6px;display:block}
 .hint{color:var(--dim);font-size:12px;margin:8px 0 0}
 .pin{width:24px;height:24px;border-radius:50%;background:var(--acc);color:#1a1205;font:700 12px/24px system-ui;text-align:center;border:2px solid #1a1205;cursor:grab}
-@media(max-width:720px){#panel{top:auto;width:100%;height:46%;border-right:0;border-top:1px solid var(--line)}}
+.gl{font:600 11px ui-monospace,Menlo,monospace;color:#ffd9d4;text-shadow:0 0 3px #000,0 0 3px #000,0 0 2px #000;pointer-events:none;white-space:nowrap}
+#hud{position:absolute;z-index:1;left:356px;top:calc(8px + env(safe-area-inset-top));background:rgba(20,32,27,.88);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:12px/1.35 ui-monospace,Menlo,monospace;pointer-events:none}
+#xh{position:absolute;z-index:1;width:22px;height:22px;margin:-11px 0 0 -11px;pointer-events:none;background:linear-gradient(#fff,#fff) center/2px 100% no-repeat,linear-gradient(#fff,#fff) center/100% 2px no-repeat;filter:drop-shadow(0 0 2px #000);opacity:.9}
+#panel{overscroll-behavior:contain}
+#readout{cursor:pointer}
+#pt{display:none}
+@media(max-width:720px){#panel{top:auto;width:100%;height:46%;border-right:0;border-top:1px solid var(--line);padding-bottom:calc(14px + env(safe-area-inset-bottom))}#panel.collapsed{height:auto;overflow:hidden}#panel.collapsed>:not(#pt){display:none}#pt{display:block;width:100%;margin-bottom:8px;text-align:left}#panel.collapsed #pt{margin-bottom:0}#hud{left:8px}}
+@media(pointer:coarse){input,select,button{font-size:16px;min-height:42px}input[type=checkbox]{min-height:0;width:20px;height:20px}input[type=range]{min-height:0}}
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="hud" class="mono"></div>
+<div id="xh"></div>
 <div id="panel">
+  <button id="pt">▼ Hide panel</button>
   <h1>Idaho 3D route planner</h1>
-  <div id="readout" class="mono">Move the cursor over the map</div>
+  <div id="readout" class="mono" title="Tap to copy the grid reference">Tap the map to read a grid reference</div>
   <label for="goto">Go to MGRS (e.g. 11T NJ 12345 67890)</label>
   <div class="row"><input id="goto" type="text" placeholder="MGRS grid reference" autocomplete="off"><button id="go">Go</button><button id="add">+ WP</button></div>
+  <div class="row"><button id="atX" style="flex:1">Add waypoint at crosshair</button></div>
   <div class="row">
     <select id="base" aria-label="Basemap"><option value="topo">USGS Topo</option><option value="imagery">USGS Imagery</option><option value="osm">OpenStreetMap</option></select>
     <label style="margin:0;align-self:center;white-space:nowrap">Relief</label>
@@ -60,14 +77,40 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
   </div>
   <canvas id="prof" aria-label="Elevation profile"></canvas>
   <div id="msg" class="hint" role="status"></div>
+  <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+    <label>Visibility: observer height (m), target height (m), viewshed radius</label>
+    <div class="row"><input id="oh" type="number" value="2" min="0" step="0.5" style="width:64px" aria-label="Observer height in metres"><input id="th" type="number" value="2" min="0" step="0.5" style="width:64px" aria-label="Target height in metres"><select id="vr" aria-label="Viewshed radius"><option value="2">2 km</option><option value="5" selected>5 km</option><option value="10">10 km</option><option value="15">15 km</option></select></div>
+    <div class="row"><button id="bLos">Line of sight</button><button id="bVs">Viewshed</button><button id="bVc">Clear</button></div>
+    <canvas id="los" style="display:none;height:100px" aria-label="Line of sight profile"></canvas>
+    <div id="vmsg" class="hint" role="status"></div>
+  </div>
+  <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+    <label>Offline maps: save the area around the map center (USGS maps only)</label>
+    <div class="row"><select id="or" aria-label="Offline radius"><option value="5">5 km</option><option value="10" selected>10 km</option><option value="25">25 km</option></select><select id="oz" aria-label="Offline detail"><option value="13">Standard detail</option><option value="14" selected>High detail</option><option value="15">Max detail</option></select></div>
+    <div class="row"><button id="oSave" class="p">Save area</button><button id="oStop">Stop</button><button id="oClear">Delete all</button></div>
+    <div id="omsg" class="hint" role="status"></div>
+  </div>
+  <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+    <label>Offline position (iPhone GPS; cellular service not required)</label>
+    <div class="row"><button id="gpsStart" class="p">Start GPS</button><button id="gpsStop">Stop GPS</button><button id="gpsCenter">Center</button></div>
+    <div id="gpsStatus" class="hint" role="status">GPS off. Enable Location Services and grant location permission.</div>
+    <div id="gpsGrid" class="mono" style="margin:6px 0;font-weight:700;color:var(--acc)"></div>
+    <div class="row"><label style="margin:0"><input id="gpsRecord" type="checkbox"> Record track (this session)</label><button id="gpsExport">Export track GPX</button></div>
+    <label for="garminFile">Garmin track import (GPX): recorded tracks, not live watch GPS</label>
+    <input id="garminFile" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml" style="width:100%">
+    <div id="garminStatus" class="hint" role="status">Live Garmin Bluetooth integration is not available in this browser.</div>
+  </div>
   <div class="row" style="margin-top:8px"><button id="undo">Undo</button><button id="clear">Clear</button><button id="gpx" class="p">Export GPX</button></div>
   <p class="hint">Click the map to add waypoints. Drag a pin to move it, double-click to delete. Right-drag or Ctrl-drag to tilt and rotate. Auto-route finds the fastest path between waypoints using Tobler’s hiking function and avoids slopes above your limit. It reads slope only, so it does not yet avoid lakes or rivers.</p>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mgrs@1.0.0/dist/mgrs.js"></script>
+<script src="maplibre-gl.js"></script>
+<script src="mgrs.js"></script>
 <script>
 const $=id=>document.getElementById(id);
+const SET=(()=>{try{return JSON.parse(localStorage.getItem('mgrs-set'))||{}}catch(e){return{}}})();
+['base','ex','pace','auto','maxs','gridT'].forEach(id=>{if(SET[id]!==undefined){const el=$(id);if(el.type==='checkbox')el.checked=SET[id];else el.value=SET[id]}});
+let SV=null;try{SV=JSON.parse(localStorage.getItem('mgrs-view'))}catch(e){}
 const BASES={
   topo:['https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}'],
   imagery:['https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}'],
@@ -75,23 +118,27 @@ const BASES={
 };
 const E0=()=>({type:'FeatureCollection',features:[]});
 const map=new maplibregl.Map({
-  container:'map',center:[-114.95,44.1],zoom:11,pitch:65,bearing:20,maxPitch:85,
+  container:'map',center:(SV&&SV.c)||[-114.95,44.1],zoom:SV?SV.z:11,pitch:SV?SV.p:65,bearing:SV?SV.b:20,maxPitch:85,
   style:{version:8,
     sources:{
       base:{type:'raster',tiles:BASES.topo,tileSize:256,maxzoom:16,attribution:'USGS National Map · OpenStreetMap'},
-      dem:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],encoding:'terrarium',tileSize:256,maxzoom:15,attribution:'Terrain: AWS/Mapzen'},
-      grid:{type:'geojson',data:E0()},route:{type:'geojson',data:E0()}},
+      dem:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],encoding:'terrarium',tileSize:256,maxzoom:13,attribution:'Terrain: AWS/Mapzen'},
+      grid:{type:'geojson',data:E0()},route:{type:'geojson',data:E0()},los:{type:'geojson',data:E0()}},
     layers:[
       {id:'bg',type:'background',paint:{'background-color':'#0d1612'}},
       {id:'base',type:'raster',source:'base'},
       {id:'grid',type:'line',source:'grid',filter:['==',['get','m'],0],paint:{'line-color':'#ff3b30','line-opacity':.7,'line-width':1}},
       {id:'grid-major',type:'line',source:'grid',filter:['==',['get','m'],1],paint:{'line-color':'#ff3b30','line-opacity':.9,'line-width':2.5}},
       {id:'route-c',type:'line',source:'route',paint:{'line-color':'#1a1205','line-width':7}},
-      {id:'route',type:'line',source:'route',paint:{'line-color':'#f2a33a','line-width':4}}
+      {id:'route',type:'line',source:'route',paint:{'line-color':'#f2a33a','line-width':4}},
+      {id:'los-g',type:'line',source:'los',filter:['==',['get','c'],'g'],paint:{'line-color':'#3ddc84','line-width':3.5}},
+      {id:'los-r',type:'line',source:'los',filter:['==',['get','c'],'r'],paint:{'line-color':'#ff3b30','line-width':3.5}},
+      {id:'los-pt',type:'circle',source:'los',filter:['==',['geometry-type'],'Point'],paint:{'circle-radius':6,'circle-color':'#ffffff','circle-stroke-color':'#000000','circle-stroke-width':2}}
     ],
     terrain:{source:'dem',exaggeration:1.4}}
 });
 map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'top-right');
+map.addControl(new maplibregl.GeolocateControl({positionOptions:{enableHighAccuracy:true},trackUserLocation:true,showUserLocation:true}),'top-right');
 map.addControl(new maplibregl.ScaleControl({unit:'metric'}));
 
 /* ---------- UTM math (WGS84) ---------- */
@@ -121,7 +168,7 @@ function fromUTM(e,n,zone){
 /* ---------- MGRS grid overlay ---------- */
 function drawGrid(){
   const src=map.getSource('grid');if(!src)return;
-  if(!$('gridT').checked){src.setData(E0());return}
+  if(!$('gridT').checked){src.setData(E0());setLabels([]);return}
   const zone=Math.floor((map.getCenter().lng+180)/6)+1,b=map.getBounds(),z=map.getZoom();
   let step=z>=12.5?1000:z>=9.5?10000:100000;
   const u=[[b.getWest(),b.getSouth()],[b.getEast(),b.getSouth()],[b.getWest(),b.getNorth()],[b.getEast(),b.getNorth()]].map(p=>toUTM(p[0],p[1],zone));
@@ -129,7 +176,7 @@ function drawGrid(){
   const e0=Math.min(...E),e1=Math.max(...E),n0=Math.min(...N),n1=Math.max(...N);
   if(![e0,e1,n0,n1].every(isFinite))return;
   for(let i=0;i<4&&((e1-e0)/step>50||(n1-n0)/step>50);i++)step*=10;
-  if((e1-e0)/step>80||(n1-n0)/step>80){src.setData(E0());return}
+  if((e1-e0)/step>80||(n1-n0)/step>80){src.setData(E0());setLabels([]);return}
   const fs=[],S=10;
   for(let e=Math.floor(e0/step)*step;e<=e1;e+=step){
     const c=[];for(let i=0;i<=S;i++)c.push(fromUTM(e,n0+(n1-n0)*i/S,zone));
@@ -140,6 +187,7 @@ function drawGrid(){
     fs.push({type:'Feature',properties:{m:n%100000===0?1:0},geometry:{type:'LineString',coordinates:c}});
   }
   src.setData(JSON.parse(JSON.stringify({type:'FeatureCollection',features:fs})));
+  makeLabels(zone,step,e0,e1,n0,n1);
 }
 function fmtMGRS(lng,lat){
   const s=mgrs.forward([lng,lat],5),m=s.match(/^(\d{1,2}[A-Z])([A-Z]{2})(\d{5})(\d{5})$/);
@@ -148,31 +196,92 @@ function fmtMGRS(lng,lat){
 const ex=()=>+$('ex').value;
 const elev=ll=>{try{const v=map.queryTerrainElevation(ll);return(v==null||isNaN(v))?null:v/ex()}catch(e){return null}};
 
-map.on('mousemove',e=>{
-  const{lng,lat}=e.lngLat,h=elev(e.lngLat);
-  $('readout').innerHTML=`<b>${fmtMGRS(lng,lat)}</b><br>${lat.toFixed(5)}, ${lng.toFixed(5)}${h!=null?` · ${Math.round(h)} m / ${Math.round(h*3.281)} ft`:''}`;
+let lastM='';
+function showAt(ll){
+  const{lng,lat}=ll,h=elev(ll);lastM=fmtMGRS(lng,lat);
+  $('readout').innerHTML=`<b>${lastM}</b><br>${lat.toFixed(5)}, ${lng.toFixed(5)}${h!=null?` · ${Math.round(h)} m / ${Math.round(h*3.281)} ft`:''}`;
+}
+map.on('mousemove',e=>showAt(e.lngLat));
+map.on('click',e=>showAt(e.lngLat));
+$('readout').onclick=()=>{if(lastM&&navigator.clipboard)navigator.clipboard.writeText(lastM).then(()=>{$('readout').style.borderColor='#f2a33a';setTimeout(()=>$('readout').style.borderColor='',700)}).catch(()=>{})};
+function updateHud(){
+  const c=map.getCenter(),h=elev(c),z=map.getZoom(),step=z>=12.5?'1 km':z>=9.5?'10 km':'100 km';
+  let id='';try{const m=mgrs.forward([c.lng,c.lat],0).match(/^(\d{1,2}[A-Z])([A-Z]{2})/);id=m?m[1]+' '+m[2]:''}catch(e){}
+  $('hud').innerHTML=`<b style="color:var(--acc)">${fmtMGRS(c.lng,c.lat)}</b><br>${id} · ${step} grid${h!=null?' · '+Math.round(h)+' m':''}`;
+}
+function applyPad(){
+  const pn=$('panel'),pad=innerWidth>720?{left:340,top:0,right:0,bottom:0}:{left:0,top:0,right:0,bottom:pn.offsetHeight};
+  map.setPadding(pad);
+  $('xh').style.left=(pad.left+(innerWidth-pad.left)/2)+'px';$('xh').style.top=((innerHeight-pad.bottom)/2)+'px';
+  updateHud();
+}
+function updatePt(){const c=$('panel').classList.contains('collapsed');$('pt').textContent=(c?'▲ Panel':'▼ Hide panel')+(wps.length>1?` · ${$('sD').textContent} · +${$('sG').textContent.replace(' m','')} m`:'')}
+$('pt').onclick=()=>{$('panel').classList.toggle('collapsed');applyPad();updatePt()};
+map.on('moveend',()=>{updateHud();try{localStorage.setItem('mgrs-view',JSON.stringify({c:map.getCenter().toArray(),z:map.getZoom(),p:map.getPitch(),b:map.getBearing()}))}catch(e){}});
+function saveSet(){try{const o={};['base','ex','pace','auto','maxs','gridT'].forEach(id=>{const el=$(id);o[id]=el.type==='checkbox'?el.checked:el.value});localStorage.setItem('mgrs-set',JSON.stringify(o))}catch(e){}}
+document.querySelectorAll('#panel select,#panel input').forEach(el=>el.addEventListener('change',saveSet));
+
+/* MGRS grid labels (DOM markers so they follow the terrain) */
+const lblPool=[];
+function setLabels(list){
+  list.forEach((L,i)=>{let m=lblPool[i];
+    if(!m){const el=document.createElement('div');el.className='gl';m=new maplibregl.Marker({element:el,anchor:'center'}).setLngLat(L.ll).addTo(map);lblPool[i]=m}else m.setLngLat(L.ll);
+    const el=m.getElement();el.textContent=L.t;el.style.display=''});
+  for(let i=list.length;i<lblPool.length;i++)lblPool[i].getElement().style.display='none';
+}
+function makeLabels(zone,step,e0,e1,n0,n1){
+  const cv=map.getCanvas(),W=cv.clientWidth,H=cv.clientHeight,P=map.getPadding(),L=[];
+  const vx0=(P.left||0)+16,vx1=W-(P.right||0)-16,vy0=(P.top||0)+16,vy1=H-(P.bottom||0)-16,vw=vx1-vx0,vh=vy1-vy0;
+  const inside=p=>p.x>vx0&&p.x<vx1&&p.y>vy0&&p.y<vy1;
+  const pick=(coords,score)=>{let best=null,bs=1e9;for(const c of coords){const p=map.project(c);if(!inside(p))continue;const sc=score(p);if(sc<bs){bs=sc;best=c}}return best};
+  const dense=f=>{const c=[];for(let i=0;i<=40;i++)c.push(f(i/40));return c};
+  const txt=v=>step===1000?String(Math.floor(v/1000)%100).padStart(2,'0'):String(Math.floor(v/10000)%10);
+  if(step===100000){
+    for(let e=Math.floor(e0/step)*step;e<=e1&&L.length<80;e+=step)for(let n=Math.floor(n0/step)*step;n<=n1&&L.length<80;n+=step){
+      const ll=fromUTM(e+50000,n+50000,zone);if(!inside(map.project(ll)))continue;
+      try{const m=mgrs.forward(ll,0).match(/([A-Z]{2})$/);if(m)L.push({ll,t:m[1]})}catch(x){}
+    }
+  }else{
+    const ty=vy0+vh*.82,tx=vx0+vw*.12;
+    for(let e=Math.floor(e0/step)*step;e<=e1&&L.length<70;e+=step){
+      const b=pick(dense(f=>fromUTM(e,n0+(n1-n0)*f,zone)),p=>Math.abs(p.y-ty));if(b)L.push({ll:b,t:txt(e)});
+    }
+    for(let n=Math.floor(n0/step)*step;n<=n1&&L.length<140;n+=step){
+      const b=pick(dense(f=>fromUTM(e0+(e1-e0)*f,n,zone)),p=>Math.abs(p.x-tx));if(b)L.push({ll:b,t:txt(n)});
+    }
+  }
+  setLabels(L);
+}
+map.on('load',()=>{
+  if(BASES[$('base').value])map.getSource('base').setTiles(BASES[$('base').value]);
+  map.setTerrain({source:'dem',exaggeration:ex()});
+  applyPad();drawGrid();
+  try{(JSON.parse(localStorage.getItem('mgrs-wps'))||[]).forEach(p=>mkWP(p[0],p[1]));if(wps.length)changed()}catch(e){}
 });
-map.on('load',drawGrid);map.on('moveend',drawGrid);
+map.on('moveend',drawGrid);
+addEventListener('resize',applyPad);
 $('gridT').onchange=drawGrid;
 $('ex').oninput=()=>{map.setTerrain({source:'dem',exaggeration:ex()});map.once('idle',()=>update())};
 $('base').onchange=e=>map.getSource('base').setTiles(BASES[e.target.value]);
 
 /* ---------- Waypoints & route ---------- */
-let wps=[],legs=[],token=0,retries=0,prof=[];
+let wps=[],legs=[],token=0,retries=0,prof=[],tool=null,losPts=[];
 const legCache=new Map();
 function hav(a,b){const R=6371008.8,dLa=rad(b[1]-a[1]),dLo=rad(b[0]-a[0]);
   const x=Math.sin(dLa/2)**2+Math.cos(rad(a[1]))*Math.cos(rad(b[1]))*Math.sin(dLo/2)**2;return 2*R*Math.asin(Math.sqrt(x))}
-function addWP(lng,lat){
+function addWP(lng,lat){mkWP(lng,lat);changed()}
+function mkWP(lng,lat){
   const el=document.createElement('div');el.className='pin';
   const mk=new maplibregl.Marker({element:el,draggable:true}).setLngLat([lng,lat]).addTo(map);
   mk.on('dragend',changed);
   el.addEventListener('click',ev=>ev.stopPropagation());
   el.addEventListener('dblclick',ev=>{ev.stopPropagation();mk.remove();wps=wps.filter(w=>w!==mk);changed()});
-  wps.push(mk);changed();
+  wps.push(mk);
 }
-map.on('click',e=>addWP(e.lngLat.lng,e.lngLat.lat));
+map.on('click',e=>{if(tool)visClick(e.lngLat.toArray());else addWP(e.lngLat.lng,e.lngLat.lat)});
 const setMsg=t=>{$('msg').textContent=t||''};
-function changed(){computeLegs()}
+function saveState(){try{localStorage.setItem('mgrs-wps',JSON.stringify(wps.map(m=>m.getLngLat().toArray())))}catch(e){}}
+function changed(){saveState();computeLegs()}
 
 /* Terrain-aware routing: A* over a DEM grid built from Terrarium tiles */
 const tick=()=>new Promise(r=>setTimeout(r,0));
@@ -264,12 +373,128 @@ async function computeLegs(){
   setMsg(notes.join(' ')||'Auto-route complete.');
 }
 
+/* ---------- Visibility: line of sight and viewshed ---------- */
+const drop=d=>d*d*.87/(2*6371000);
+async function loadDEM(lo,hi,maxCells){
+  const wx=(lng,z)=>(lng+180)/360*256*2**z;
+  const wy=(lat,z)=>{const s=Math.sin(rad(lat));return(.5-Math.log((1+s)/(1-s))/(4*Math.PI))*256*2**z};
+  let z=13,x0,x1,y0,y1;
+  for(;z>=8;z--){x0=Math.floor(wx(lo[0],z));x1=Math.ceil(wx(hi[0],z));y0=Math.floor(wy(hi[1],z));y1=Math.ceil(wy(lo[1],z));if((x1-x0)*(y1-y0)<=maxCells)break}
+  if(z<8)throw new Error('Area too large');
+  const W=x1-x0,H=y1-y0,tx0=Math.floor(x0/256),tx1=Math.floor((x1-1)/256),ty0=Math.floor(y0/256),ty1=Math.floor((y1-1)/256);
+  const cv=document.createElement('canvas');cv.width=(tx1-tx0+1)*256;cv.height=(ty1-ty0+1)*256;
+  const cx=cv.getContext('2d',{willReadFrequently:true});cx.imageSmoothingEnabled=false;
+  const jobs=[];
+  for(let ty=ty0;ty<=ty1;ty++)for(let tx=tx0;tx<=tx1;tx++)jobs.push((async()=>{
+    const r=await fetch(`https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`);
+    if(!r.ok)throw new Error('Elevation tile download failed');
+    const bm=await createImageBitmap(await r.blob(),{colorSpaceConversion:'none',premultiplyAlpha:'none'});
+    cx.drawImage(bm,(tx-tx0)*256,(ty-ty0)*256);
+  })());
+  await Promise.all(jobs);
+  const Dd=cx.getImageData(x0-tx0*256,y0-ty0*256,W,H).data,el=new Float32Array(W*H);
+  for(let i=0;i<W*H;i++)el[i]=Dd[4*i]*256+Dd[4*i+1]+Dd[4*i+2]/256-32768;
+  const cs=156543.03392*Math.cos(rad((lo[1]+hi[1])/2))/2**z,W0=256*2**z;
+  return{el,W,H,cs,z,
+    px:(lng,lat)=>[wx(lng,z)-x0,wy(lat,z)-y0],
+    ll:(x,y)=>[(x0+x)/W0*360-180,deg(Math.atan(Math.sinh(Math.PI*(1-2*(y0+y)/W0))))],
+    bil:(x,y)=>{const fx=Math.min(W-1.001,Math.max(0,x-.5)),fy=Math.min(H-1.001,Math.max(0,y-.5)),i0=fx|0,j0=fy|0,tx=fx-i0,ty=fy-j0,i=j0*W+i0;
+      return el[i]*(1-tx)*(1-ty)+el[i+1]*tx*(1-ty)+el[i+W]*(1-tx)*ty+el[i+W+1]*tx*ty}};
+}
+const vmsg=t=>{$('vmsg').textContent=t||''};
+function setTool(t){
+  tool=(tool===t)?null:t;losPts=[];
+  $('bLos').classList.toggle('on',tool==='los');$('bVs').classList.toggle('on',tool==='vs');
+  vmsg(tool==='los'?'Tap the observer point on the map.':tool==='vs'?'Tap the observer point on the map.':'');
+}
+function clearVis(){
+  tool=null;losPts=[];$('bLos').classList.remove('on');$('bVs').classList.remove('on');
+  map.getSource('los').setData(E0());
+  if(map.getLayer('vs'))map.removeLayer('vs');if(map.getSource('vs'))map.removeSource('vs');
+  $('los').style.display='none';vmsg('');
+}
+async function visClick(pt){
+  try{
+    if(tool==='los'){
+      losPts.push(pt);
+      if(losPts.length===1){
+        map.getSource('los').setData({type:'Feature',properties:{},geometry:{type:'Point',coordinates:pt}});
+        vmsg('Observer set. Tap the target point.');return;
+      }
+      const A=losPts[0],B=losPts[1];tool=null;losPts=[];$('bLos').classList.remove('on');
+      await doLOS(A,B);
+    }else if(tool==='vs'){
+      const O=pt;tool=null;$('bVs').classList.remove('on');
+      await doViewshed(O);
+    }
+  }catch(e){tool=null;$('bLos').classList.remove('on');$('bVs').classList.remove('on');vmsg('Error: '+e.message)}
+}
+async function doLOS(A,B){
+  vmsg('Computing line of sight…');
+  const lo=[Math.min(A[0],B[0])-.01,Math.min(A[1],B[1])-.01],hi=[Math.max(A[0],B[0])+.01,Math.max(A[1],B[1])+.01];
+  const D=await loadDEM(lo,hi,1.5e6),ha=+$('oh').value||0,ht=+$('th').value||0;
+  const dist=hav(A,B),n=Math.max(2,Math.ceil(dist/D.cs)),pa=D.px(A[0],A[1]),pb=D.px(B[0],B[1]),smp=[];
+  for(let i=0;i<=n;i++){const f=i/n,x=pa[0]+(pb[0]-pa[0])*f,y=pa[1]+(pb[1]-pa[1])*f,d=dist*f,raw=D.bil(x,y);smp.push({d,raw,h:raw-drop(d*(1)) ,f,x,y})}
+  const e0=smp[0].h+ha,e1=smp[n].h+ht;let first=-1,worst=0,wi=-1,minC=Infinity;
+  smp.forEach((q,i)=>{q.ln=e0+(e1-e0)*q.f;const c=q.ln-q.h;if(i>0&&i<n){minC=Math.min(minC,c);if(c<0&&first<0)first=i;if(c<worst){worst=c;wi=i}}});
+  const feats=[],pt=(q)=>D.ll(q.x,q.y);
+  if(first<0)feats.push({type:'Feature',properties:{c:'g'},geometry:{type:'LineString',coordinates:[A,B]}});
+  else{const m=pt(smp[first]);
+    feats.push({type:'Feature',properties:{c:'g'},geometry:{type:'LineString',coordinates:[A,m]}});
+    feats.push({type:'Feature',properties:{c:'r'},geometry:{type:'LineString',coordinates:[m,B]}});}
+  feats.push({type:'Feature',properties:{},geometry:{type:'Point',coordinates:A}},{type:'Feature',properties:{},geometry:{type:'Point',coordinates:B}});
+  map.getSource('los').setData(JSON.parse(JSON.stringify({type:'FeatureCollection',features:feats})));
+  drawLOS(smp,wi);
+  const km=(dist/1000).toFixed(2)+' km';
+  vmsg(first<0?`Clear line of sight over ${km}. Lowest clearance ${Math.round(minC)} m.`:
+    `Blocked over ${km}. Worst obstruction ${Math.round(-worst)} m above the sight line at ${(smp[wi].d/1000).toFixed(2)} km (${Math.round(smp[wi].raw)} m). Observer ${fmtMGRS(A[0],A[1])}, target ${fmtMGRS(B[0],B[1])}.`);
+}
+function drawLOS(s,wi){
+  const c=$('los');c.style.display='block';
+  const r=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=w*r;c.height=h*r;
+  const x=c.getContext('2d');x.scale(r,r);x.clearRect(0,0,w,h);
+  const all=s.flatMap(q=>[q.h,q.ln]),lo=Math.min(...all),hi=Math.max(...all),D=s[s.length-1].d,pad=10,rng=Math.max(hi-lo,10);
+  const X=d=>pad+(w-2*pad)*d/D,Y=v=>h-pad-(h-2*pad)*(v-lo)/rng;
+  x.beginPath();x.moveTo(X(0),h-pad);s.forEach(q=>x.lineTo(X(q.d),Y(q.h)));x.lineTo(X(D),h-pad);x.closePath();x.fillStyle='rgba(147,161,152,.35)';x.fill();
+  x.beginPath();s.forEach((q,i)=>i?x.lineTo(X(q.d),Y(q.ln)):x.moveTo(X(q.d),Y(q.ln)));x.strokeStyle=wi<0?'#3ddc84':'#ff3b30';x.lineWidth=1.5;x.stroke();
+  if(wi>=0){x.beginPath();x.arc(X(s[wi].d),Y(s[wi].h),4,0,7);x.fillStyle='#ff3b30';x.fill()}
+}
+async function doViewshed(O){
+  vmsg('Computing viewshed…');
+  const Rm=+$('vr').value*1000,ha=+$('oh').value||0,th=+$('th').value||0;
+  const dLat=Rm/111320,dLng=Rm/(111320*Math.cos(rad(O[1])));
+  const D=await loadDEM([O[0]-dLng,O[1]-dLat],[O[0]+dLng,O[1]+dLat],1.5e6);
+  const[ox,oy]=D.px(O[0],O[1]),R=Math.floor(Math.min(Rm/D.cs,ox,oy,D.W-ox,D.H-oy)-1);
+  if(R<5)throw new Error('Observer too close to the edge of the data');
+  const eye=D.bil(ox,oy)+ha,vis=new Uint8Array(D.W*D.H),nR=Math.ceil(2*Math.PI*R*1.2);
+  for(let k=0;k<nR;k++){
+    const a=k/nR*2*Math.PI,ca=Math.cos(a),sa=Math.sin(a);let mt=-Infinity;
+    for(let r=1;r<=R;r++){
+      const x=ox+ca*r,y=oy+sa*r,d=r*D.cs,h=D.bil(x,y)-drop(d);
+      if((h+th-eye)/d>=mt)vis[Math.round(y)*D.W+Math.round(x)]=1;
+      const tg=(h-eye)/d;if(tg>mt)mt=tg;
+    }
+    if(k%250===0)await tick();
+  }
+  const cv=document.createElement('canvas');cv.width=D.W;cv.height=D.H;
+  const cx=cv.getContext('2d'),im=cx.createImageData(D.W,D.H);let cnt=0;
+  for(let i=0;i<vis.length;i++)if(vis[i]){cnt++;im.data[4*i]=61;im.data[4*i+1]=220;im.data[4*i+2]=132;im.data[4*i+3]=170}
+  cx.putImageData(im,0,0);
+  if(map.getLayer('vs'))map.removeLayer('vs');if(map.getSource('vs'))map.removeSource('vs');
+  map.addSource('vs',{type:'image',url:cv.toDataURL(),coordinates:[D.ll(0,0),D.ll(D.W,0),D.ll(D.W,D.H),D.ll(0,D.H)]});
+  map.addLayer({id:'vs',type:'raster',source:'vs',paint:{'raster-opacity':.65,'raster-resampling':'nearest'}},'grid');
+  map.getSource('los').setData({type:'Feature',properties:{},geometry:{type:'Point',coordinates:O}});
+  const pct=100*cnt*D.cs*D.cs/(Math.PI*(R*D.cs)**2);
+  vmsg(`Viewshed from ${fmtMGRS(O[0],O[1])}: ${pct.toFixed(0)}% of the ${(R*D.cs/1000).toFixed(1)} km radius is visible (green). Includes earth curvature and refraction.`);
+}
+$('bLos').onclick=()=>setTool('los');$('bVs').onclick=()=>setTool('vs');$('bVc').onclick=clearVis;
+
 function update(user){
   if(user!==false)retries=0;
   wps.forEach((m,i)=>m.getElement().textContent=i+1);
   const pts=wps.map(m=>m.getLngLat().toArray());
   $('wps').innerHTML=pts.map((p,i)=>{const h=elev(new maplibregl.LngLat(p[0],p[1]));
-    return`<li data-i="${i}"><span>${i+1}</span><span>${fmtMGRS(p[0],p[1])}</span><span style="margin-left:auto;color:var(--dim)">${h!=null?Math.round(h)+' m':''}</span></li>`}).join('');
+    return`<li data-i="${i}"><span>${i+1}</span><span>${fmtMGRS(p[0],p[1])}</span><span style="margin-left:auto;color:var(--dim)">${h!=null?Math.round(h)+' m':''}</span><button data-del="${i}" aria-label="Delete waypoint ${i+1}" style="padding:0 10px;min-height:28px">×</button></li>`}).join('');
   prof=[];let d=0,g=0,l=0,t=0,miss=false;const pace=+$('pace').value;
   for(let i=0;i<pts.length-1;i++){
     const a=pts[i],b=pts[i+1],leg=legs[i];
@@ -298,7 +523,7 @@ function update(user){
   $('sD').textContent=(d/1000).toFixed(2)+' km';
   $('sG').textContent=Math.round(g)+' m';$('sL').textContent=Math.round(l)+' m';
   $('sT').textContent=Math.floor(t)+' h '+String(Math.round((t%1)*60)).padStart(2,'0')+' m';
-  drawProfile(sm);
+  drawProfile(sm);updatePt();
   if(miss&&retries++<4)map.once('idle',()=>update(false));
 }
 function drawProfile(s){
@@ -314,7 +539,12 @@ function drawProfile(s){
   x.fillStyle='#93a198';x.font='10px ui-monospace,monospace';
   x.fillText(Math.round(hi)+' m',4,10);x.fillText(Math.round(lo)+' m',4,h-3);
 }
-$('wps').onclick=e=>{const li=e.target.closest('li');if(li){map.flyTo({center:wps[li.dataset.i].getLngLat(),zoom:Math.max(map.getZoom(),13)})}};
+$('wps').onclick=e=>{
+  const d=e.target.closest('[data-del]');
+  if(d){const m=wps.splice(+d.dataset.del,1)[0];if(m)m.remove();changed();return}
+  const li=e.target.closest('li');if(li)map.flyTo({center:wps[li.dataset.i].getLngLat(),zoom:Math.max(map.getZoom(),13)});
+};
+$('atX').onclick=()=>{const c=map.getCenter();addWP(c.lng,c.lat)};
 $('undo').onclick=()=>{const m=wps.pop();if(m)m.remove();changed()};
 $('clear').onclick=()=>{wps.forEach(m=>m.remove());wps=[];changed()};
 $('auto').onchange=changed;$('maxs').onchange=changed;
@@ -340,6 +570,61 @@ $('gpx').onclick=()=>{
   g+='</trkseg></trk>\n</gpx>';
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([g],{type:'application/gpx+xml'}));a.download='route.gpx';a.click();
 };
+
+/* ---------- Offline maps ---------- */
+const TILE_CACHE='tiles-v1',DEM_URL='https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+let offAbort=false;
+const omsg=t=>{$('omsg').textContent=t||''};
+function tileRange(lo,hi,z){const n=2**z,X=l=>Math.floor((l+180)/360*n),Y=l=>{const s=Math.sin(rad(l));return Math.floor((.5-Math.log((1+s)/(1-s))/(4*Math.PI))*n)};return{x0:X(lo[0]),x1:X(hi[0]),y0:Y(hi[1]),y1:Y(lo[1])}}
+function planTiles(){
+  const c=map.getCenter(),R=+$('or').value*1000,dLat=R/111320,dLng=R/(111320*Math.cos(rad(c.lat)));
+  const lo=[c.lng-dLng,c.lat-dLat],hi=[c.lng+dLng,c.lat+dLat],bz=+$('oz').value,bt=BASES[$('base').value][0],urls=[];
+  const add=(tpl,z0,z1)=>{for(let z=z0;z<=z1;z++){const r=tileRange(lo,hi,z);for(let x=r.x0;x<=r.x1;x++)for(let y=r.y0;y<=r.y1;y++)urls.push(tpl.replace('{z}',z).replace('{x}',x).replace('{y}',y))}};
+  add(bt,8,bz);add(DEM_URL,8,13);return urls;
+}
+async function showUsage(extra){
+  let t='';
+  try{if(navigator.storage&&navigator.storage.estimate){const e=await navigator.storage.estimate();t=`Storage used: ${Math.round((e.usage||0)/1048576)} MB.`}}catch(e){}
+  omsg([extra,t].filter(Boolean).join(' '));
+}
+function estimate(){const n=planTiles().length;showUsage(`This area is about ${n} tiles (roughly ${Math.max(1,Math.round(n*.02))} MB).`)}
+async function saveArea(){
+  if($('base').value==='osm'){omsg('OpenStreetMap tiles cannot be bulk downloaded. Switch to USGS Topo or USGS Imagery.');return}
+  if(!('caches' in window)){omsg('Offline storage is not available in this browser.');return}
+  const urls=planTiles();
+  if(urls.length>6000){omsg(`${urls.length} tiles is too many. Pick a smaller radius or lower detail.`);return}
+  offAbort=false;$('oSave').disabled=true;
+  const cache=await caches.open(TILE_CACHE);let done=0,fail=0,i=0;
+  const worker=async()=>{while(i<urls.length&&!offAbort){const u=urls[i++];
+    try{if(!(await cache.match(u))){const r=await fetch(u,{mode:'cors'});if(r.ok)await cache.put(u,r);else fail++}}catch(e){fail++}
+    done++;if(done%10===0)omsg(`Saving ${done} of ${urls.length} tiles…`)}};
+  await Promise.all(Array.from({length:6},worker));
+  $('oSave').disabled=false;
+  showUsage(offAbort?`Stopped at ${done} of ${urls.length} tiles.`:`Saved ${urls.length-fail} of ${urls.length} tiles.`+(fail?` ${fail} failed, run it again to retry.`:''));
+}
+$('oSave').onclick=saveArea;$('oStop').onclick=()=>{offAbort=true};
+$('oClear').onclick=async()=>{if(confirm('Delete all saved offline map tiles?')){await caches.delete(TILE_CACHE);showUsage('Offline tiles deleted.')}};
+['or','oz','base'].forEach(id=>$(id).addEventListener('change',estimate));
+/* Offline position: browser GPS works without cellular coverage when device has a fix.
+   Garmin Instinct Solar 1 does not expose a supported browser GPS feed. */
+let gpsWatch=null,gpsMarker=null,gpsAccuracy=null,gpsLast=null,gpsTrack=[],garminMarkers=[];
+const gpsMsg=t=>{$('gpsStatus').textContent=t};
+function gpsUpdate(p){
+  const c=p.coords,ll=[c.longitude,c.latitude];gpsLast=ll;
+  if(!gpsMarker){const el=document.createElement('div');el.style.cssText='width:18px;height:18px;background:#3297ff;border:3px solid white;border-radius:50%;box-shadow:0 0 0 3px #124e8d';gpsMarker=new maplibregl.Marker({element:el}).setLngLat(ll).addTo(map)}else gpsMarker.setLngLat(ll);
+  if(!gpsAccuracy){map.addSource('gps-accuracy',{type:'geojson',data:E0()});map.addLayer({id:'gps-accuracy-fill',type:'fill',source:'gps-accuracy',paint:{'fill-color':'#3297ff','fill-opacity':0.13}});gpsAccuracy=true}
+  const radius=Math.max(0,c.accuracy||0),coords=[];for(let i=0;i<=48;i++){const a=i*Math.PI/24;coords.push([ll[0]+Math.cos(a)*radius/(111320*Math.max(.05,Math.cos(ll[1]*Math.PI/180))),ll[1]+Math.sin(a)*radius/111320])}
+  map.getSource('gps-accuracy').setData({type:'Feature',geometry:{type:'Polygon',coordinates:[coords]},properties:{}});
+  $('gpsGrid').textContent=fmtMGRS(ll[0],ll[1]);
+  gpsMsg('iPhone GPS · accuracy ±'+Math.round(radius)+' m · '+new Date(p.timestamp).toLocaleTimeString()+(c.speed!=null?' · '+(c.speed*3.6).toFixed(1)+' km/h':''));
+  if($('gpsRecord').checked){const last=gpsTrack[gpsTrack.length-1];if(!last||p.timestamp-last.t>=1000)gpsTrack.push({lat:ll[1],lon:ll[0],t:p.timestamp,ele:c.altitude})}
+}
+$('gpsStart').onclick=()=>{if(!navigator.geolocation){gpsMsg('GPS not supported by this browser.');return}if(gpsWatch!==null)return;gpsMsg('Acquiring GPS fix…');gpsWatch=navigator.geolocation.watchPosition(gpsUpdate,e=>gpsMsg('GPS error: '+e.message+'. Check Location Services and browser permission.'),{enableHighAccuracy:true,maximumAge:0,timeout:30000})};
+$('gpsStop').onclick=()=>{if(gpsWatch!==null)navigator.geolocation.clearWatch(gpsWatch);gpsWatch=null;gpsMsg('GPS stopped. Last position remains on map.')};
+$('gpsCenter').onclick=()=>{if(gpsLast)map.flyTo({center:gpsLast,zoom:Math.max(map.getZoom(),14)});else gpsMsg('Start GPS and wait for a position first.')};
+$('gpsExport').onclick=()=>{if(!gpsTrack.length){gpsMsg('No recorded track. Enable Record track while GPS is running.');return}const xml='<?xml version="1.0" encoding="UTF-8"?><gpx version="1.1" creator="MGRS Offline Planner" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>iPhone GPS Track</name><trkseg>'+gpsTrack.map(p=>'<trkpt lat="'+p.lat+'" lon="'+p.lon+'">'+(Number.isFinite(p.ele)?'<ele>'+p.ele+'</ele>':'')+'<time>'+new Date(p.t).toISOString()+'</time></trkpt>').join('')+'</trkseg></trk></gpx>';const u=URL.createObjectURL(new Blob([xml],{type:'application/gpx+xml'}));const a=document.createElement('a');a.href=u;a.download='iphone-track.gpx';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000)};
+$('garminFile').onchange=async e=>{const file=e.target.files[0];if(!file)return;if(file.size>10*1024*1024){$('garminStatus').textContent='File too large (10 MB limit).';return}try{const doc=new DOMParser().parseFromString(await file.text(),'application/xml');if(doc.querySelector('parsererror'))throw Error('Invalid XML');const nodes=[...doc.getElementsByTagName('*')].filter(n=>['trkpt','rtept'].includes(n.localName));const coords=nodes.map(n=>[Number(n.getAttribute('lon')),Number(n.getAttribute('lat'))]).filter(p=>Number.isFinite(p[0])&&Number.isFinite(p[1])&&Math.abs(p[0])<=180&&Math.abs(p[1])<=90);if(!coords.length)throw Error('No GPX track points found');if(map.getLayer('garmin-track'))map.removeLayer('garmin-track');if(map.getSource('garmin-track'))map.removeSource('garmin-track');map.addSource('garmin-track',{type:'geojson',data:{type:'Feature',geometry:{type:'LineString',coordinates:coords},properties:{}}});map.addLayer({id:'garmin-track',type:'line',source:'garmin-track',paint:{'line-color':'#ffcb58','line-width':4}});const b=coords.reduce((b,p)=>b.extend(p),new maplibregl.LngLatBounds(coords[0],coords[0]));map.fitBounds(b,{padding:45,maxZoom:15});$('garminStatus').textContent='Imported '+coords.length+' Garmin track points (recorded GPX, not live).'}catch(err){$('garminStatus').textContent='Import failed: '+err.message}};
+if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(e=>omsg('Offline mode unavailable: '+e.message)));
 addEventListener('resize',()=>update());
 /* error banner */
 const eb=document.createElement('div');eb.style.cssText='position:absolute;z-index:5;right:8px;bottom:30px;max-width:340px;background:#5a1410;color:#fff;font:12px monospace;padding:6px 8px;border-radius:6px;display:none';document.body.appendChild(eb);
