@@ -68,6 +68,8 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
   </div>
   <div class="row"><label style="margin:0;align-self:center"><input id="gridT" type="checkbox" checked> MGRS grid</label><span style="flex:1"></span><label style="margin:0;align-self:center">Pace <select id="pace"><option value="1">Normal</option><option value="1.3">Slow (pack)</option><option value="0.8">Fast</option></select></label></div>
   <div class="row"><label style="margin:0;align-self:center"><input id="auto" type="checkbox" checked> Auto-route</label><span style="flex:1"></span><label style="margin:0;align-self:center">Max slope <select id="maxs"><option value="25">25°</option><option value="30">30°</option><option value="35" selected>35°</option><option value="40">40°</option><option value="45">45°</option></select></label></div>
+  <div class="row"><label style="margin:0;align-self:center">Water <select id="wm"><option value="avoid" selected>Avoid, cheapest crossing</option><option value="wade">Allow wading</option><option value="off">Ignore water</option></select></label></div>
+  <div class="row"><label style="margin:0;align-self:center">Flow limit <input id="fl" type="number" value="500" min="10" step="50" style="width:84px" aria-label="Flow limit in cubic feet per second"> cfs</label><span style="flex:1"></span><label style="margin:0;align-self:center"><input id="wShow" type="checkbox"> Show water</label></div>
   <ul id="wps" class="mono"></ul>
   <div id="stats">
     <div><small>Distance</small><strong id="sD">0 km</strong></div>
@@ -77,6 +79,8 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
   </div>
   <canvas id="prof" aria-label="Elevation profile"></canvas>
   <div id="msg" class="hint" role="status"></div>
+  <div id="xmsg" class="hint" role="status"></div>
+  <div id="wmsg" class="hint" role="status"></div>
   <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
     <label>Visibility: observer height (m), target height (m), viewshed radius</label>
     <div class="row"><input id="oh" type="number" value="2" min="0" step="0.5" style="width:64px" aria-label="Observer height in metres"><input id="th" type="number" value="2" min="0" step="0.5" style="width:64px" aria-label="Target height in metres"><select id="vr" aria-label="Viewshed radius"><option value="2">2 km</option><option value="5" selected>5 km</option><option value="10">10 km</option><option value="15">15 km</option></select></div>
@@ -109,7 +113,7 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
 <script>
 const $=id=>document.getElementById(id);
 const SET=(()=>{try{return JSON.parse(localStorage.getItem('mgrs-set'))||{}}catch(e){return{}}})();
-['base','ex','pace','auto','maxs','gridT'].forEach(id=>{if(SET[id]!==undefined){const el=$(id);if(el.type==='checkbox')el.checked=SET[id];else el.value=SET[id]}});
+['base','ex','pace','auto','maxs','gridT','wm','fl','wShow'].forEach(id=>{if(SET[id]!==undefined){const el=$(id);if(el.type==='checkbox')el.checked=SET[id];else el.value=SET[id]}});
 let SV=null;try{SV=JSON.parse(localStorage.getItem('mgrs-view'))}catch(e){}
 const BASES={
   topo:['https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}'],
@@ -123,17 +127,22 @@ const map=new maplibregl.Map({
     sources:{
       base:{type:'raster',tiles:BASES.topo,tileSize:256,maxzoom:16,attribution:'USGS National Map · OpenStreetMap'},
       dem:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],encoding:'terrarium',tileSize:256,maxzoom:13,attribution:'Terrain: AWS/Mapzen'},
-      grid:{type:'geojson',data:E0()},route:{type:'geojson',data:E0()},los:{type:'geojson',data:E0()}},
+      grid:{type:'geojson',data:E0()},route:{type:'geojson',data:E0()},los:{type:'geojson',data:E0()},water:{type:'geojson',data:E0()},gauges:{type:'geojson',data:E0()},xings:{type:'geojson',data:E0()}},
     layers:[
       {id:'bg',type:'background',paint:{'background-color':'#0d1612'}},
       {id:'base',type:'raster',source:'base'},
+      {id:'water-fill',type:'fill',source:'water',filter:['==',['geometry-type'],'Polygon'],paint:{'fill-color':'#2b6cb0','fill-opacity':.4}},
+      {id:'water-line',type:'line',source:'water',filter:['all',['==',['geometry-type'],'LineString'],['!',['in',['get','c'],['literal',['river','canal']]]]],paint:{'line-color':'#4aa3ff','line-width':1.5}},
+      {id:'water-river',type:'line',source:'water',filter:['all',['==',['geometry-type'],'LineString'],['in',['get','c'],['literal',['river','canal']]]],paint:{'line-color':'#4aa3ff','line-width':3}},
       {id:'grid',type:'line',source:'grid',filter:['==',['get','m'],0],paint:{'line-color':'#ff3b30','line-opacity':.7,'line-width':1}},
       {id:'grid-major',type:'line',source:'grid',filter:['==',['get','m'],1],paint:{'line-color':'#ff3b30','line-opacity':.9,'line-width':2.5}},
       {id:'route-c',type:'line',source:'route',paint:{'line-color':'#1a1205','line-width':7}},
       {id:'route',type:'line',source:'route',paint:{'line-color':'#f2a33a','line-width':4}},
       {id:'los-g',type:'line',source:'los',filter:['==',['get','c'],'g'],paint:{'line-color':'#3ddc84','line-width':3.5}},
       {id:'los-r',type:'line',source:'los',filter:['==',['get','c'],'r'],paint:{'line-color':'#ff3b30','line-width':3.5}},
-      {id:'los-pt',type:'circle',source:'los',filter:['==',['geometry-type'],'Point'],paint:{'circle-radius':6,'circle-color':'#ffffff','circle-stroke-color':'#000000','circle-stroke-width':2}}
+      {id:'los-pt',type:'circle',source:'los',filter:['==',['geometry-type'],'Point'],paint:{'circle-radius':6,'circle-color':'#ffffff','circle-stroke-color':'#000000','circle-stroke-width':2}},
+      {id:'gauges',type:'circle',source:'gauges',paint:{'circle-radius':6,'circle-color':'#22d3ee','circle-stroke-color':'#000000','circle-stroke-width':2}},
+      {id:'xings',type:'circle',source:'xings',paint:{'circle-radius':8,'circle-color':'#ff5ad1','circle-stroke-color':'#ffffff','circle-stroke-width':2}}
     ],
     terrain:{source:'dem',exaggeration:1.4}}
 });
@@ -218,7 +227,7 @@ function applyPad(){
 function updatePt(){const c=$('panel').classList.contains('collapsed');$('pt').textContent=(c?'▲ Panel':'▼ Hide panel')+(wps.length>1?` · ${$('sD').textContent} · +${$('sG').textContent.replace(' m','')} m`:'')}
 $('pt').onclick=()=>{$('panel').classList.toggle('collapsed');applyPad();updatePt()};
 map.on('moveend',()=>{updateHud();try{localStorage.setItem('mgrs-view',JSON.stringify({c:map.getCenter().toArray(),z:map.getZoom(),p:map.getPitch(),b:map.getBearing()}))}catch(e){}});
-function saveSet(){try{const o={};['base','ex','pace','auto','maxs','gridT'].forEach(id=>{const el=$(id);o[id]=el.type==='checkbox'?el.checked:el.value});localStorage.setItem('mgrs-set',JSON.stringify(o))}catch(e){}}
+function saveSet(){try{const o={};['base','ex','pace','auto','maxs','gridT','wm','fl','wShow'].forEach(id=>{const el=$(id);o[id]=el.type==='checkbox'?el.checked:el.value});localStorage.setItem('mgrs-set',JSON.stringify(o))}catch(e){}}
 document.querySelectorAll('#panel select,#panel input').forEach(el=>el.addEventListener('change',saveSet));
 
 /* MGRS grid labels (DOM markers so they follow the terrain) */
@@ -255,17 +264,17 @@ function makeLabels(zone,step,e0,e1,n0,n1){
 map.on('load',()=>{
   if(BASES[$('base').value])map.getSource('base').setTiles(BASES[$('base').value]);
   map.setTerrain({source:'dem',exaggeration:ex()});
-  applyPad();drawGrid();
+  applyPad();drawGrid();showWater();
   try{(JSON.parse(localStorage.getItem('mgrs-wps'))||[]).forEach(p=>mkWP(p[0],p[1]));if(wps.length)changed()}catch(e){}
 });
-map.on('moveend',drawGrid);
+map.on('moveend',drawGrid);map.on('moveend',showWater);
 addEventListener('resize',applyPad);
 $('gridT').onchange=drawGrid;
 $('ex').oninput=()=>{map.setTerrain({source:'dem',exaggeration:ex()});map.once('idle',()=>update())};
 $('base').onchange=e=>map.getSource('base').setTiles(BASES[e.target.value]);
 
 /* ---------- Waypoints & route ---------- */
-let wps=[],legs=[],token=0,retries=0,prof=[],tool=null,losPts=[];
+let wps=[],legs=[],legX=[],token=0,retries=0,prof=[],tool=null,losPts=[];
 const legCache=new Map();
 function hav(a,b){const R=6371008.8,dLa=rad(b[1]-a[1]),dLo=rad(b[0]-a[0]);
   const x=Math.sin(dLa/2)**2+Math.cos(rad(a[1]))*Math.cos(rad(b[1]))*Math.sin(dLo/2)**2;return 2*R*Math.asin(Math.sqrt(x))}
@@ -278,10 +287,127 @@ function mkWP(lng,lat){
   el.addEventListener('dblclick',ev=>{ev.stopPropagation();mk.remove();wps=wps.filter(w=>w!==mk);changed()});
   wps.push(mk);
 }
-map.on('click',e=>{if(tool)visClick(e.lngLat.toArray());else addWP(e.lngLat.lng,e.lngLat.lat)});
+map.on('click',e=>{
+  const f=map.queryRenderedFeatures(e.point,{layers:['xings','gauges']});
+  if(f.length&&!tool){const d=document.createElement('div');d.textContent=f[0].properties.t;d.style.cssText='color:#14201b;font:13px system-ui;max-width:220px';new maplibregl.Popup({closeButton:true}).setLngLat(f[0].geometry.coordinates).setDOMContent(d).addTo(map);return}
+  if(tool)visClick(e.lngLat.toArray());else addWP(e.lngLat.lng,e.lngLat.lat)});
 const setMsg=t=>{$('msg').textContent=t||''};
 function saveState(){try{localStorage.setItem('mgrs-wps',JSON.stringify(wps.map(m=>m.getLngLat().toArray())))}catch(e){}}
 function changed(){saveState();computeLegs()}
+
+/* ---------- Water: OSM waterways and lakes, USGS stream gauges ---------- */
+const WZ=11,WCACHE='water-v1',wtMem=new Map(),gMem=new Map(),gaugeSet=new Map();
+const OVP=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter'];
+const WCODE={minor:1,stream:2,river:3,canal:4},WNAME={1:'seasonal stream',2:'stream',3:'river',4:'canal',5:'wide river'};
+const wmsg=t=>{$('wmsg').textContent=t||''};
+function wtBox(x,y,z){const n=2**z,lg=v=>v/n*360-180,lt=v=>deg(Math.atan(Math.sinh(Math.PI*(1-2*v/n))));return{w:lg(x),e:lg(x+1),n:lt(y),s:lt(y+1)}}
+const polyClass=(t,w)=>(w==='riverbank'||['river','stream','canal','oxbow'].includes(t.water))?'rpoly':'lake';
+function joinRings(ws){
+  const rings=[],pool=ws.map(w=>w.slice());
+  while(pool.length){
+    let cur=pool.pop();
+    for(let guard=0;guard<5000;guard++){
+      const a=cur[0],b=cur[cur.length-1];
+      if(a[0]===b[0]&&a[1]===b[1]&&cur.length>3)break;
+      let found=false;
+      for(let i=0;i<pool.length;i++){
+        const w=pool[i],wa=w[0],wb=w[w.length-1];
+        if(wa[0]===b[0]&&wa[1]===b[1]){cur=cur.concat(w.slice(1))}
+        else if(wb[0]===b[0]&&wb[1]===b[1]){cur=cur.concat(w.slice().reverse().slice(1))}
+        else if(wb[0]===a[0]&&wb[1]===a[1]){cur=w.concat(cur.slice(1))}
+        else if(wa[0]===a[0]&&wa[1]===a[1]){cur=w.slice().reverse().concat(cur.slice(1))}
+        else continue;
+        pool.splice(i,1);found=true;break;
+      }
+      if(!found)break;
+    }
+    rings.push(cur);
+  }
+  return rings;
+}
+function parseWater(json){
+  const lines=[],polys=[],rnd=v=>Math.round(v*1e5)/1e5,geo=g=>(g||[]).filter(Boolean).map(p=>[rnd(p.lon),rnd(p.lat)]);
+  for(const e of json.elements||[]){
+    const t=e.tags||{};
+    if(e.type==='way'&&e.geometry){
+      const g=geo(e.geometry),w=t.waterway;
+      if(w==='river'||w==='stream'||w==='canal'){
+        const c=w==='canal'?'canal':w==='river'?'river':(t.intermittent==='yes'||t.seasonal==='yes'||t.intermittent==='seasonal')?'minor':'stream';
+        lines.push({c,n:t.name||'',g});
+      }else if((t.natural==='water'||w==='riverbank')&&g.length>3&&g[0][0]===g[g.length-1][0]&&g[0][1]===g[g.length-1][1]){
+        polys.push({c:polyClass(t,w),n:t.name||'',r:[g],h:[]});
+      }
+    }else if(e.type==='relation'&&e.members){
+      const o=[],h=[];
+      e.members.forEach(m=>{if(m.type==='way'&&m.geometry){(m.role==='inner'?h:o).push(geo(m.geometry))}});
+      const r=joinRings(o);
+      if(r.length)polys.push({c:polyClass(t,t.waterway),n:t.name||'',r,h:joinRings(h)});
+    }
+  }
+  return{lines,polys};
+}
+async function getWaterTile(x,y){
+  const key=`${x}/${y}`;if(wtMem.has(key))return wtMem.get(key);
+  const ck='https://water-cache.local/z'+WZ+'/'+key;
+  if('caches' in window){try{const c=await caches.open(WCACHE),hit=await c.match(ck);if(hit){const p=await hit.json();wtMem.set(key,p);return p}}catch(e){}}
+  const b=wtBox(x,y,WZ),bb=`${b.s.toFixed(4)},${b.w.toFixed(4)},${b.n.toFixed(4)},${b.e.toFixed(4)}`;
+  const q=`[out:json][timeout:60];(way["waterway"~"^(river|stream|canal)$"](${bb});way["natural"="water"](${bb});way["waterway"="riverbank"](${bb});relation["natural"="water"](${bb}););out geom qt;`;
+  let json=null,err=null;
+  for(const u of OVP){
+    try{const ctl=new AbortController(),tm=setTimeout(()=>ctl.abort(),50000);
+      const r=await fetch(u+'?data='+encodeURIComponent(q),{signal:ctl.signal});clearTimeout(tm);
+      if(!r.ok)throw new Error('HTTP '+r.status);json=await r.json();break}catch(e){err=e}
+  }
+  if(!json)throw err||new Error('no response');
+  const parsed=parseWater(json);
+  if('caches' in window){try{const c=await caches.open(WCACHE);await c.put(ck,new Response(JSON.stringify(parsed)))}catch(e){}}
+  wtMem.set(key,parsed);return parsed;
+}
+async function getGauges(lo,hi){
+  const key=[lo[0],lo[1],hi[0],hi[1]].map(v=>v.toFixed(2)).join(',');
+  const m=gMem.get(key);if(m&&Date.now()-m.t<6e5)return m.v;
+  try{
+    const r=await fetch(`https://waterservices.usgs.gov/nwis/iv/?format=json&bBox=${lo[0].toFixed(4)},${lo[1].toFixed(4)},${hi[0].toFixed(4)},${hi[1].toFixed(4)}&parameterCd=00060&siteStatus=active`);
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const j=await r.json(),out=[];
+    ((j.value&&j.value.timeSeries)||[]).forEach(ts=>{
+      const v=ts.values&&ts.values[0]&&ts.values[0].value,last=v&&v[v.length-1],cfs=last?parseFloat(last.value):NaN,si=ts.sourceInfo;
+      if(last&&cfs>=0&&si)out.push({id:si.siteCode[0].value,name:si.siteName,lat:si.geoLocation.geographicLocation.latitude,lng:si.geoLocation.geographicLocation.longitude,cfs,t:last.dateTime});
+    });
+    gMem.set(key,{t:Date.now(),v:out});return out;
+  }catch(e){return[]}
+}
+function drawGauges(){
+  map.getSource('gauges').setData(JSON.parse(JSON.stringify({type:'FeatureCollection',features:[...gaugeSet.values()].map(g=>({type:'Feature',properties:{t:`${g.name}: ${Math.round(g.cfs)} cfs, ${g.t.replace('T',' ').slice(0,16)}`},geometry:{type:'Point',coordinates:[g.lng,g.lat]}}))})));
+}
+let wTok=0;
+async function showWater(){
+  const src=map.getSource('water');if(!src)return;
+  const my=++wTok;
+  if(!$('wShow').checked){src.setData(E0());wmsg('');return}
+  if(map.getZoom()<10.5){src.setData(E0());wmsg('Zoom in to show water.');return}
+  const b=map.getBounds(),lo=[b.getWest(),b.getSouth()],hi=[b.getEast(),b.getNorth()],r=tileRange(lo,hi,WZ);
+  if((r.x1-r.x0+1)*(r.y1-r.y0+1)>9){wmsg('Zoom in to show water.');return}
+  wmsg('Loading water…');const feats=[];let miss=0;
+  for(let x=r.x0;x<=r.x1;x++)for(let y=r.y0;y<=r.y1;y++){
+    try{const t=await getWaterTile(x,y);if(my!==wTok)return;
+      t.lines.forEach(L=>feats.push({type:'Feature',properties:{c:L.c},geometry:{type:'LineString',coordinates:L.g}}));
+      t.polys.forEach(P=>P.r.forEach(rg=>{if(rg.length>3)feats.push({type:'Feature',properties:{c:P.c},geometry:{type:'Polygon',coordinates:[rg]}})}));
+    }catch(e){miss++}
+  }
+  if(my!==wTok)return;
+  src.setData(JSON.parse(JSON.stringify({type:'FeatureCollection',features:feats})));
+  (await getGauges(lo,hi)).forEach(g=>gaugeSet.set(g.id,g));drawGauges();
+  wmsg(miss?`${miss} water tile(s) could not load. Try again with a connection.`:'');
+}
+function renderCrossings(){
+  const list=[];legX.forEach(a=>(a||[]).forEach(x=>list.push(x)));
+  map.getSource('xings').setData(JSON.parse(JSON.stringify({type:'FeatureCollection',features:list.map((x,i)=>({type:'Feature',properties:{t:crossText(x,i)},geometry:{type:'Point',coordinates:x.ll}}))})));
+  $('xmsg').textContent=list.length?`Water crossings: ${list.map((x,i)=>crossText(x,i)).join(' ')} Flow numbers are not depth or speed. Scout every crossing.`:'';
+}
+function crossText(x,i){
+  return `${i+1}. ${x.name||'Unnamed '+x.cls}${x.name?' ('+x.cls+')':''}${x.w?', about '+x.w+' m wide':''} at ${fmtMGRS(x.ll[0],x.ll[1])}${x.cfs!=null?`, gauge reads ${Math.round(x.cfs)} cfs`:', no gauge data'}.`;
+}
 
 /* Terrain-aware routing: A* over a DEM grid built from Terrarium tiles */
 const tick=()=>new Promise(r=>setTimeout(r,0));
@@ -325,6 +451,47 @@ async function routeLeg(a,b,maxS,stale){
   const sx=cl(Math.floor(wx(a[0],z)-x0),W),sy=cl(Math.floor(wy(a[1],z)-y0),H),gx=cl(Math.floor(wx(b[0],z)-x0),W),gy=cl(Math.floor(wy(b[1],z)-y0),H);
   const S=sy*W+sx,G=gy*W+gx,g=new Float32Array(W*H).fill(Infinity),par=new Int32Array(W*H).fill(-1),closed=new Uint8Array(W*H);
   const DX=[1,-1,0,0,1,1,-1,-1],DY=[0,0,1,-1,1,-1,1,-1],DD=[1,1,1,1,1.41421,1.41421,1.41421,1.41421];
+  let wc=null,wn=null,pen=null,gauges=[],waterNote='';const names=[''],nameG=[null];
+  const wm=$('wm').value,fl=+$('fl').value||500;
+  if(wm!=='off'){
+    wc=new Uint8Array(W*H);wn=new Uint16Array(W*H);
+    const tiles=[],tr=tileRange(lo,hi,WZ);let miss=0;
+    for(let tx=tr.x0;tx<=tr.x1;tx++)for(let ty=tr.y0;ty<=tr.y1;ty++){try{tiles.push(await getWaterTile(tx,ty));if(stale())throw new Error('stale')}catch(e){if(e.message==='stale')throw e;miss++}}
+    if(miss)waterNote=`Water data missing for ${miss} area(s). Connect once to load it, or use Save area.`;
+    gauges=await getGauges(lo,hi);gauges.forEach(g=>gaugeSet.set(g.id,g));drawGauges();
+    const nm=q=>q.toUpperCase().replace(/\bCREEK\b/g,'CR').replace(/\bRIVER\b/g,'R').replace(/\bFORK\b/g,'FK').replace(/[^A-Z0-9 ]/g,'').replace(/\s+/g,' ').trim();
+    const mid=[(a[0]+b[0])/2,(a[1]+b[1])/2];
+    const reg=name=>{if(!name)return 0;let i=names.indexOf(name);if(i>=0)return i;
+      const k=nm(name);let best=null,bd=1e12;
+      gauges.forEach(g=>{const gn=nm(g.name);if(gn===k||gn.startsWith(k+' ')){const d=hav(mid,[g.lng,g.lat]);if(d<bd){bd=d;best=g}}});
+      names.push(name);nameG.push(best);return names.length-1};
+    const toC=pt=>[wx(pt[0],z)-x0,wy(pt[1],z)-y0];
+    const stamp=(x,y,code,ni)=>{const fx=Math.floor(x),fy=Math.floor(y);
+      for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){if(dx*dx+dy*dy>1)continue;const cx=fx+dx,cy=fy+dy;if(cx<0||cy<0||cx>=W||cy>=H)continue;const i=cy*W+cx;if(code>wc[i]){wc[i]=code;wn[i]=ni}}};
+    const fillPoly=(rings,code,ni)=>{
+      let ymin=1e9,ymax=-1e9;rings.forEach(r=>r.forEach(pt=>{ymin=Math.min(ymin,pt[1]);ymax=Math.max(ymax,pt[1])}));
+      for(let y=Math.max(0,Math.floor(ymin));y<=Math.min(H-1,Math.floor(ymax));y++){
+        const xs=[],yc=y+.5;
+        for(const r of rings)for(let i=0,n=r.length;i<n;i++){const p=r[i],q=r[(i+1)%n];if((p[1]<=yc)!==(q[1]<=yc))xs.push(p[0]+(yc-p[1])/(q[1]-p[1])*(q[0]-p[0]))}
+        xs.sort((u,v)=>u-v);
+        for(let k=0;k+1<xs.length;k+=2)for(let x=Math.max(0,Math.ceil(xs[k]-.5));x<=Math.min(W-1,Math.floor(xs[k+1]-.5));x++){const i=y*W+x;if(code>wc[i]){wc[i]=code;wn[i]=ni}}
+      }};
+    for(const t of tiles)for(const L of t.lines){
+      const code=WCODE[L.c],ni=reg(L.n),pts=L.g.map(toC);
+      for(let k=0;k<pts.length-1;k++){
+        const[ax,ay]=pts[k],[bx,by]=pts[k+1];
+        if(Math.max(ax,bx)<-2||Math.min(ax,bx)>W+2||Math.max(ay,by)<-2||Math.min(ay,by)>H+2)continue;
+        const n=Math.max(1,Math.ceil(Math.hypot(bx-ax,by-ay)*2));
+        for(let q=0;q<=n;q++){const f=q/n;stamp(ax+(bx-ax)*f,ay+(by-ay)*f,code,ni)}
+      }
+    }
+    for(const t of tiles)for(const P of t.polys)fillPoly(P.r.concat(P.h).map(r=>r.map(toC)),P.c==='lake'?6:5,reg(P.n));
+    pen=new Float32Array(W*H);const mul=wm==='avoid'?1:.3,PT={1:40,2:300,3:1500,4:2400};
+    for(let i=0;i<W*H;i++){const c=wc[i];if(!c||c===6)continue;const g=nameG[wn[i]];
+      if(g&&g.cfs>fl){wc[i]=6;continue}
+      pen[i]=(c===5?40*cs:PT[c]/3)*mul*(1+(g?2*g.cfs/fl:0))}
+    wc[S]=wc[S]===6?0:wc[S];wc[G]=wc[G]===6?0:wc[G];
+  }
   const hf=i=>Math.hypot(i%W-gx,((i/W)|0)-gy)*cs/vmax,heap=new Heap();
   g[S]=0;heap.push(hf(S),S);let it=0,found=false;
   while(heap.size){
@@ -334,41 +501,49 @@ async function routeLeg(a,b,maxS,stale){
     const ux=u%W,uy=(u/W)|0,hu=el[u];
     for(let k=0;k<8;k++){
       const nx=ux+DX[k],ny=uy+DY[k];if(nx<0||ny<0||nx>=W||ny>=H)continue;
-      const v=ny*W+nx;if(closed[v])continue;
+      const v=ny*W+nx;if(closed[v])continue;if(wc&&wc[v]===6)continue;
       const dist=cs*DD[k],sl=(el[v]-hu)/dist,as=Math.abs(sl);if(as>ts)continue;
-      const c=dist/(vmax*Math.exp(-3.5*Math.abs(sl+.05)))*(1+Math.pow(as/ts,3)),ng=g[u]+c;
+      const c=dist/(vmax*Math.exp(-3.5*Math.abs(sl+.05)))*(1+Math.pow(as/ts,3))+(pen?pen[v]:0),ng=g[u]+c;
       if(ng<g[v]){g[v]=ng;par[v]=u;heap.push(ng+hf(v),v)}
     }
   }
-  if(!found)throw new Error(`No route under ${maxS}° slope`);
+  if(!found)throw new Error(`No route under ${maxS}° slope${wc?' with the current water settings':''}`);
   let P=[];for(let i=G;i!==-1;i=par[i])P.push([i%W+.5,((i/W)|0)+.5]);P.reverse();
   const Sm=dp(P,1.2),stepC=Math.max(1,30/cs),W0=256*2**z;
   const ll=(x,y)=>[(x0+x)/W0*360-180,deg(Math.atan(Math.sinh(Math.PI*(1-2*(y0+y)/W0))))];
   const bil=(x,y)=>{const fx=Math.min(W-1.001,Math.max(0,x-.5)),fy=Math.min(H-1.001,Math.max(0,y-.5)),i0=fx|0,j0=fy|0,tx=fx-i0,ty=fy-j0,i=j0*W+i0;
     return el[i]*(1-tx)*(1-ty)+el[i+1]*tx*(1-ty)+el[i+W]*(1-tx)*ty+el[i+W+1]*tx*ty};
+  const xs=[];
+  if(wc){let run=null;
+    for(const[cx,cy]of P){const i=Math.floor(cy)*W+Math.floor(cx),c=wc[i];
+      if(c>=1&&c<=5){if(!run)run={c,ni:wn[i],cells:0,x:cx,y:cy};run.cells++;if(!run.ni&&wn[i])run.ni=wn[i]}
+      else if(run){xs.push(run);run=null}}
+    if(run)xs.push(run);
+  }
+  const crossings=xs.map(r=>{const g=nameG[r.ni];return{ll:ll(r.x,r.y),cls:WNAME[r.c],name:names[r.ni]||'',w:r.c===5?Math.round(r.cells*cs):0,cfs:g?g.cfs:null}});
   const out=[];
   for(let i=0;i<Sm.length-1;i++){
     const[ax,ay]=Sm[i],[bx,by]=Sm[i+1],n=Math.max(1,Math.round(Math.hypot(bx-ax,by-ay)/stepC));
     for(let k=i?1:0;k<=n;k++){const f=k/n,x=ax+(bx-ax)*f,y=ay+(by-ay)*f;out.push({p:ll(x,y),h:bil(x,y)})}
   }
   if(out.length<2)out.push({...out[0]});
-  return{path:out};
+  return{path:out,crossings,waterNote};
 }
 async function computeLegs(){
   const my=++token,n=Math.max(0,wps.length-1);
-  legs=new Array(n).fill(null);setMsg('');update();
+  legs=new Array(n).fill(null);legX=new Array(n).fill(null);setMsg('');update();renderCrossings();
   if(!$('auto').checked||!n)return;
   const pts=wps.map(m=>m.getLngLat().toArray()),ms=+$('maxs').value,notes=[],stale=()=>my!==token;
   for(let i=0;i<n;i++){
-    const key=[pts[i],pts[i+1],ms].join('|');let r=legCache.get(key);
+    const wmv=$('wm').value,key=[pts[i],pts[i+1],ms,wmv,$('fl').value,wmv==='off'?0:Math.floor(Date.now()/6e5)].join('|');let r=legCache.get(key);
     if(!r){
       setMsg(`Routing leg ${i+1} of ${n}…`);
       try{r=await routeLeg(pts[i],pts[i+1],ms,stale)}catch(e){if(e.message==='stale')return;r={err:e.message}}
-      if(r.path||/No route/.test(r.err))legCache.set(key,r);
+      if((r.path&&!r.waterNote)||/No route/.test(r.err))legCache.set(key,r);
     }
     if(stale())return;
-    if(r.path)legs[i]=r.path;else notes.push(`Leg ${i+1}: ${r.err} (straight line shown).`);
-    update(false);
+    if(r.path){legs[i]=r.path;legX[i]=r.crossings||[];if(r.waterNote)notes.push(`Leg ${i+1}: ${r.waterNote}`)}else notes.push(`Leg ${i+1}: ${r.err} (straight line shown).`);
+    update(false);renderCrossings();
   }
   setMsg(notes.join(' ')||'Auto-route complete.');
 }
@@ -547,7 +722,7 @@ $('wps').onclick=e=>{
 $('atX').onclick=()=>{const c=map.getCenter();addWP(c.lng,c.lat)};
 $('undo').onclick=()=>{const m=wps.pop();if(m)m.remove();changed()};
 $('clear').onclick=()=>{wps.forEach(m=>m.remove());wps=[];changed()};
-$('auto').onchange=changed;$('maxs').onchange=changed;
+$('auto').onchange=changed;$('maxs').onchange=changed;$('wm').onchange=changed;$('fl').onchange=changed;$('wShow').onchange=showWater;
 $('pace').onchange=update;
 
 /* ---------- MGRS entry ---------- */
@@ -599,11 +774,16 @@ async function saveArea(){
     try{if(!(await cache.match(u))){const r=await fetch(u,{mode:'cors'});if(r.ok)await cache.put(u,r);else fail++}}catch(e){fail++}
     done++;if(done%10===0)omsg(`Saving ${done} of ${urls.length} tiles…`)}};
   await Promise.all(Array.from({length:6},worker));
+  if(!offAbort){
+    const c=map.getCenter(),R=+$('or').value*1000,dLat=R/111320,dLng=R/(111320*Math.cos(rad(c.lat))),r=tileRange([c.lng-dLng,c.lat-dLat],[c.lng+dLng,c.lat+dLat],WZ);
+    let wd=0;const wt=(r.x1-r.x0+1)*(r.y1-r.y0+1);
+    for(let x=r.x0;x<=r.x1&&!offAbort;x++)for(let y=r.y0;y<=r.y1&&!offAbort;y++){omsg(`Saving water data ${++wd} of ${wt}…`);try{await getWaterTile(x,y)}catch(e){fail++}}
+  }
   $('oSave').disabled=false;
   showUsage(offAbort?`Stopped at ${done} of ${urls.length} tiles.`:`Saved ${urls.length-fail} of ${urls.length} tiles.`+(fail?` ${fail} failed, run it again to retry.`:''));
 }
 $('oSave').onclick=saveArea;$('oStop').onclick=()=>{offAbort=true};
-$('oClear').onclick=async()=>{if(confirm('Delete all saved offline map tiles?')){await caches.delete(TILE_CACHE);showUsage('Offline tiles deleted.')}};
+$('oClear').onclick=async()=>{if(confirm('Delete all saved offline map tiles?')){await caches.delete(TILE_CACHE);await caches.delete(WCACHE);wtMem.clear();showUsage('Offline tiles deleted.')}};
 ['or','oz','base'].forEach(id=>$(id).addEventListener('change',estimate));
 /* Offline position: browser GPS works without cellular coverage when device has a fix.
    Garmin Instinct Solar 1 does not expose a supported browser GPS feed. */
