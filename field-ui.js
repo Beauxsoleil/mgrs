@@ -9,7 +9,7 @@ function focusMap(on){document.body.classList.toggle('map-focus',on);$('exitFocu
 $('focusMap').onclick=()=>focusMap(true);$('exitFocus').onclick=()=>focusMap(false);
 $('quickLocate').onclick=()=>{if(gpsLast)$('gpsCenter').click();else{setPanel(true);gpsSection.open=true;$('gpsStart').click();$('gpsStart').scrollIntoView({block:'center'});}};
 function section(id,title){const content=$(id).closest('#panel > div');const details=document.createElement('details');details.className='tool-section';const summary=document.createElement('summary');summary.textContent=title;content.before(details);details.append(summary,content);return details;}
-section('bLos','Visibility & line of sight');section('oSave','Offline maps');const gpsSection=section('gpsStart','GPS & imported tracks');const printSection=section('printExport','Print map · 1:50,000');
+section('bLos','Visibility & line of sight');section('oSave','Offline maps');const gpsSection=section('gpsStart','GPS & imported tracks');const printSection=section('printExport','Print map / Save as PDF');
 // Keep advanced route options available without filling the mobile drawer.
 const advanced=document.createElement('details');advanced.className='tool-section';advanced.innerHTML='<summary>Map & routing settings</summary>';
 const first=$('base').closest('.row');first.before(advanced);let row=first;while(row&&row.id!=='wps'){const next=row.nextElementSibling;advanced.append(row);row=next;}
@@ -19,7 +19,7 @@ const dialog=document.createElement('dialog');dialog.id='exportDialog';dialog.in
 function summary(){const gps=$('exportSource').value==='gps';$('exportSummary').textContent=gps?`${gpsTrack.length} recorded GPS points`:`${wps.length} waypoints · ${$('sD').textContent} · ${$('sT').textContent}`;$('exportStatus').textContent='';}
 function open(source='route'){$('exportSource').value=source;summary();dialog.showModal();}
 $('openExport').onclick=()=>open();$('gpx').onclick=()=>open();$('gpsExport').onclick=()=>open('gps');$('closeExport').onclick=()=>dialog.close();$('exportSource').onchange=summary;
-$('openPrint').onclick=()=>{dialog.close();setPanel(true);printSection.open=true;$('printMode').scrollIntoView({block:'center'});};
+$('openPrint').onclick=()=>{dialog.close();setPanel(true);printSection.open=true;$('printMode').scrollIntoView({block:'center'});$('printExport').click();};
 const esc=s=>String(s).replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'}[c]));
 function makeFile(){
  const gps=$('exportSource').value==='gps',name=$('exportName').value.trim()||'Field route';
@@ -45,5 +45,5 @@ function makeFile(){
 async function deliver(share){try{const file=makeFile();if(share){if(!navigator.canShare||!navigator.canShare({files:[file]}))throw Error('File sharing is unavailable here. Use Download file instead.');await navigator.share({files:[file],title:$('exportName').value});$('exportStatus').textContent='File shared.';}else{const url=URL.createObjectURL(file),a=document.createElement('a');a.href=url;a.download=file.name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);$('exportStatus').textContent='Download started: '+file.name;}}catch(e){$('exportStatus').textContent=e.name==='AbortError'?'Sharing cancelled. Your route is unchanged.':e.message;}}
 $('downloadExport').onclick=()=>deliver(false);$('shareExport').onclick=()=>deliver(true);
 $('clear').onclick=()=>{if(wps.length&&confirm('Clear all planned waypoints?')){wps.forEach(m=>m.remove());wps=[];changed();}};
-$('printSelect').addEventListener('click',()=>{setPanel(false);$('hud').hidden=false;$('infoToggle').setAttribute('aria-pressed','true');});
+$('printSelect').addEventListener('click',()=>{if(!window.mgrsPrintSelecting)return;setPanel(false);$('hud').hidden=false;$('infoToggle').setAttribute('aria-pressed','true');});
 })();
