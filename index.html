@@ -49,14 +49,18 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
 @media(max-width:720px){#panel{top:auto;width:100%;height:46%;border-right:0;border-top:1px solid var(--line);padding-bottom:calc(14px + env(safe-area-inset-bottom))}#panel.collapsed{height:auto;overflow:hidden}#panel.collapsed>:not(#pt){display:none}#pt{display:block;width:100%;margin-bottom:8px;text-align:left}#panel.collapsed #pt{margin-bottom:0}#hud{left:8px}}
 @media(pointer:coarse){input,select,button{font-size:16px;min-height:42px}input[type=checkbox]{min-height:0;width:20px;height:20px}input[type=range]{min-height:0}}
 </style>
+<link rel="stylesheet" href="field-ui.css">
 </head>
 <body>
 <div id="map"></div>
 <div id="hud" class="mono"></div>
 <div id="xh"></div>
-<div id="panel">
+<header id="mapbar"><div class="brand"><span class="brand-mark">⌖</span><div><b>MGRS<span>FIELDWORK</span></b><small>IDAHO · ROUTE PLANNER</small></div></div><button id="focusMap" aria-pressed="false">Full map</button></header>
+<nav id="mapdock" aria-label="Map controls"><button id="menuToggle" aria-controls="panel" aria-expanded="false">☰ <span>Tools</span></button><button id="infoToggle" aria-controls="hud" aria-pressed="true">ⓘ <span>Info</span></button><button id="quickLocate">◎ <span>Locate</span></button><button id="openExport">↗ <span>Export</span></button></nav>
+<button id="exitFocus" hidden>⌖ Show controls</button>
+<div id="panel" aria-label="Map tools">
   <button id="pt">▼ Hide panel</button>
-  <h1>Idaho 3D route planner</h1>
+  <h1>Plan your next route</h1><p class="eyebrow">EXPLORE · PLAN · NAVIGATE</p>
   <div id="readout" class="mono" title="Tap to copy the grid reference">Tap the map to read a grid reference</div>
   <label for="goto">Go to MGRS (e.g. 11T NJ 12345 67890)</label>
   <div class="row"><input id="goto" type="text" placeholder="MGRS grid reference" autocomplete="off"><button id="go">Go</button><button id="add">+ WP</button></div>
@@ -221,17 +225,18 @@ map.on('mousemove',e=>showAt(e.lngLat));
 map.on('click',e=>showAt(e.lngLat));
 $('readout').onclick=()=>{if(lastM&&navigator.clipboard)navigator.clipboard.writeText(lastM).then(()=>{$('readout').style.borderColor='#f2a33a';setTimeout(()=>$('readout').style.borderColor='',700)}).catch(()=>{})};
 function updateHud(){
+  if(window.mgrsPrintSelecting)return;
   const c=map.getCenter(),h=elev(c),z=map.getZoom(),step=z>=12.5?'1 km':z>=9.5?'10 km':'100 km';
   let id='';try{const m=mgrs.forward([c.lng,c.lat],0).match(/^(\d{1,2}[A-Z])([A-Z]{2})/);id=m?m[1]+' '+m[2]:''}catch(e){}
   $('hud').innerHTML=`<b style="color:var(--acc)">${fmtMGRS(c.lng,c.lat)}</b><br>${id} · ${step} grid${h!=null?' · '+Math.round(h)+' m':''}`;
 }
 function applyPad(){
-  const pn=$('panel'),pad=innerWidth>720?{left:340,top:0,right:0,bottom:0}:{left:0,top:0,right:0,bottom:pn.offsetHeight};
+  const pn=$('panel'),closed=pn.hidden||document.body.classList.contains('map-focus'),pad=closed?{left:0,top:0,right:0,bottom:0}:innerWidth>720?{left:388,top:0,right:0,bottom:0}:{left:0,top:0,right:0,bottom:pn.offsetHeight+82};
   map.setPadding(pad);
   $('xh').style.left=(pad.left+(innerWidth-pad.left)/2)+'px';$('xh').style.top=((innerHeight-pad.bottom)/2)+'px';
   updateHud();
 }
-function updatePt(){const c=$('panel').classList.contains('collapsed');$('pt').textContent=(c?'▲ Panel':'▼ Hide panel')+(wps.length>1?` · ${$('sD').textContent} · +${$('sG').textContent.replace(' m','')} m`:'')}
+function updatePt(){$('pt').textContent='Close tools ×'}
 $('pt').onclick=()=>{$('panel').classList.toggle('collapsed');applyPad();updatePt()};
 map.on('moveend',()=>{updateHud();try{localStorage.setItem('mgrs-view',JSON.stringify({c:map.getCenter().toArray(),z:map.getZoom(),p:map.getPitch(),b:map.getBearing()}))}catch(e){}});
 function saveSet(){try{const o={};['base','ex','pace','auto','maxs','gridT','wm','fl','wShow'].forEach(id=>{const el=$(id);o[id]=el.type==='checkbox'?el.checked:el.value});localStorage.setItem('mgrs-set',JSON.stringify(o))}catch(e){}}
@@ -822,5 +827,6 @@ map.on('error',e=>{const m=(e.error&&e.error.message)||'map error';if(!/Failed t
 </script>
 <script src="wmm2025.js"></script>
 <script src="print-export.js"></script>
+<script src="field-ui.js"></script>
 </body>
 </html>
