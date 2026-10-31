@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Idaho 3D MGRS Route Planner</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<style>
+:root{--bg:#14201b;--ink:#e7e3d3;--dim:#93a198;--acc:#f2a33a;--line:#2b3d35}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,sans-serif}
+#map{position:absolute;inset:0}
+#panel{position:absolute;z-index:2;left:0;top:0;bottom:0;width:340px;background:rgba(20,32,27,.94);border-right:1px solid var(--line);overflow-y:auto;padding:14px}
+h1{font:600 16px/1.2 Georgia,serif;margin:0 0 10px}
+.mono{font-family:ui-monospace,Menlo,monospace}
+#readout{background:#0d1612;border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:13px;margin-bottom:10px;min-height:52px}
+#readout b{color:var(--acc);font-weight:600}
+.row{display:flex;gap:6px;margin-bottom:8px}
+input,select,button{font:inherit;color:var(--ink);background:#1d2e27;border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+input[type=text]{flex:1;min-width:0}
+input[type=range]{padding:0;flex:1;accent-color:var(--acc)}
+button{cursor:pointer}
+button:hover{border-color:var(--acc)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+button.p{background:var(--acc);color:#1a1205;border-color:var(--acc);font-weight:600}
+label{color:var(--dim);font-size:12px;display:block;margin:2px 0 4px}
+#wps{list-style:none;margin:0 0 8px;padding:0;max-height:180px;overflow-y:auto}
+#wps li{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--line);font-size:12px;cursor:pointer}
+#wps li span:first-child{color:var(--acc);width:18px}
+#stats{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px}
+#stats div{background:#0d1612;border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+#stats small{display:block;color:var(--dim);font-size:11px}
+#stats strong{font-size:15px}
+canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);border-radius:6px;display:block}
+.hint{color:var(--dim);font-size:12px;margin:8px 0 0}
+.pin{width:24px;height:24px;border-radius:50%;background:var(--acc);color:#1a1205;font:700 12px/24px system-ui;text-align:center;border:2px solid #1a1205;cursor:grab}
+@media(max-width:720px){#panel{top:auto;width:100%;height:46%;border-right:0;border-top:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h1>Idaho 3D route planner</h1>
+  <div id="readout" class="mono">Move the cursor over the map</div>
+  <label for="goto">Go to MGRS (e.g. 11T NJ 12345 67890)</label>
+  <div class="row"><input id="goto" type="text" placeholder="MGRS grid reference" autocomplete="off"><button id="go">Go</button><button id="add">+ WP</button></div>
+  <div class="row">
+    <select id="base" aria-label="Basemap"><option value="topo">USGS Topo</option><option value="imagery">USGS Imagery</option><option value="osm">OpenStreetMap</option></select>
+    <label style="margin:0;align-self:center;white-space:nowrap">Relief</label>
+    <input id="ex" type="range" min="1" max="3" step="0.1" value="1.4" aria-label="Terrain exaggeration">
+  </div>
+  <div class="row"><label style="margin:0;align-self:center"><input id="gridT" type="checkbox" checked> MGRS grid</label><span style="flex:1"></span><label style="margin:0;align-self:center">Pace <select id="pace"><option value="1">Normal</option><option value="1.3">Slow (pack)</option><option value="0.8">Fast</option></select></label></div>
+  <ul id="wps" class="mono"></ul>
+  <div id="stats">
+    <div><small>Distance</small><strong id="sD">0 km</strong></div>
+    <div><small>Est. time</small><strong id="sT">0 h</strong></div>
+    <div><small>Gain</small><strong id="sG">0 m</strong></div>
+    <div><small>Loss</small><strong id="sL">0 m</strong></div>
+  </div>
+  <canvas id="prof" aria-label="Elevation profile"></canvas>
+  <div class="row" style="margin-top:8px"><button id="undo">Undo</button><button id="clear">Clear</button><button id="gpx" class="p">Export GPX</button></div>
+  <p class="hint">Click the map to add waypoints. Drag a pin to move it, double-click to delete. Right-drag or Ctrl-drag to tilt and rotate. Time uses Tobler’s hiking function.</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mgrs@1.0.0/dist/mgrs.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const BASES={
+  topo:['https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}'],
+  imagery:['https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}'],
+  osm:['https://tile.openstreetmap.org/{z}/{x}/{y}.png']
+};
+const E0=()=>({type:'FeatureCollection',features:[]});
+const map=new maplibregl.Map({
+  container:'map',center:[-114.95,44.1],zoom:11,pitch:65,bearing:20,maxPitch:85,
+  style:{version:8,
+    sources:{
+      base:{type:'raster',tiles:BASES.topo,tileSize:256,maxzoom:16,attribution:'USGS National Map · OpenStreetMap'},
+      dem:{type:'raster-dem',tiles:['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],encoding:'terrarium',tileSize:256,maxzoom:15,attribution:'Terrain: AWS/Mapzen'},
+      grid:{type:'geojson',data:E0()},route:{type:'geojson',data:E0()}},
+    layers:[
+      {id:'bg',type:'background',paint:{'background-color':'#0d1612'}},
+      {id:'base',type:'raster',source:'base'},
+      {id:'grid',type:'line',source:'grid',filter:['==',['get','m'],0],paint:{'line-color':'#ff3b30','line-opacity':.7,'line-width':1}},
+      {id:'grid-major',type:'line',source:'grid',filter:['==',['get','m'],1],paint:{'line-color':'#ff3b30','line-opacity':.9,'line-width':2.5}},
+      {id:'route-c',type:'line',source:'route',paint:{'line-color':'#1a1205','line-width':7}},
+      {id:'route',type:'line',source:'route',paint:{'line-color':'#f2a33a','line-width':4}}
+    ],
+    terrain:{source:'dem',exaggeration:1.4}}
+});
+map.addControl(new maplibregl.NavigationControl({visualizePitch:true}),'top-right');
+map.addControl(new maplibregl.ScaleControl({unit:'metric'}));
+
+/* ---------- UTM math (WGS84) ---------- */
+const A_=6378137,F_=1/298.257223563,K0=.9996,N_=F_/(2-F_),E2=F_*(2-F_),E_=Math.sqrt(E2);
+const AA=A_/(1+N_)*(1+N_*N_/4+N_**4/64);
+const AL=[N_/2-2*N_**2/3+5*N_**3/16,13*N_**2/48-3*N_**3/5,61*N_**3/240];
+const BE=[N_/2-2*N_**2/3+37*N_**3/96,N_**2/48+N_**3/15,17*N_**3/480];
+const DE=[2*N_-2*N_**2/3-2*N_**3,7*N_**2/3-8*N_**3/5,56*N_**3/15];
+const rad=d=>d*Math.PI/180,deg=r=>r*180/Math.PI;
+function toUTM(lng,lat,zone){
+  const p=rad(lat),l=rad(lng-((zone-1)*6-180+3)),s=Math.sin(p);
+  const t=Math.sinh(Math.atanh(s)-E_*Math.atanh(E_*s));
+  const xi=Math.atan2(t,Math.cos(l)),eta=Math.atanh(Math.sin(l)/Math.sqrt(1+t*t));
+  let X=xi,Y=eta;
+  AL.forEach((a,i)=>{const j=2*(i+1);X+=a*Math.sin(j*xi)*Math.cosh(j*eta);Y+=a*Math.cos(j*xi)*Math.sinh(j*eta)});
+  return{e:500000+K0*AA*Y,n:K0*AA*X};
+}
+function fromUTM(e,n,zone){
+  const xi=n/(K0*AA),eta=(e-500000)/(K0*AA);
+  let X=xi,Y=eta;
+  BE.forEach((b,i)=>{const j=2*(i+1);X-=b*Math.sin(j*xi)*Math.cosh(j*eta);Y-=b*Math.cos(j*xi)*Math.sinh(j*eta)});
+  const chi=Math.asin(Math.sin(X)/Math.cosh(Y));
+  let p=chi;DE.forEach((d,i)=>p+=d*Math.sin(2*(i+1)*chi));
+  return[deg(Math.atan2(Math.sinh(Y),Math.cos(X)))+(zone-1)*6-180+3,deg(p)];
+}
+
+/* ---------- MGRS grid overlay ---------- */
+function drawGrid(){
+  const src=map.getSource('grid');if(!src)return;
+  if(!$('gridT').checked){src.setData(E0());return}
+  const zone=Math.floor((map.getCenter().lng+180)/6)+1,b=map.getBounds(),z=map.getZoom();
+  let step=z>=12.5?1000:z>=9.5?10000:100000;
+  const u=[[b.getWest(),b.getSouth()],[b.getEast(),b.getSouth()],[b.getWest(),b.getNorth()],[b.getEast(),b.getNorth()]].map(p=>toUTM(p[0],p[1],zone));
+  const E=u.map(p=>p.e),N=u.map(p=>p.n);
+  const e0=Math.min(...E),e1=Math.max(...E),n0=Math.min(...N),n1=Math.max(...N);
+  if(![e0,e1,n0,n1].every(isFinite))return;
+  for(let i=0;i<4&&((e1-e0)/step>50||(n1-n0)/step>50);i++)step*=10;
+  if((e1-e0)/step>80||(n1-n0)/step>80){src.setData(E0());return}
+  const fs=[],S=10;
+  for(let e=Math.floor(e0/step)*step;e<=e1;e+=step){
+    const c=[];for(let i=0;i<=S;i++)c.push(fromUTM(e,n0+(n1-n0)*i/S,zone));
+    fs.push({type:'Feature',properties:{m:e%100000===0?1:0},geometry:{type:'LineString',coordinates:c}});
+  }
+  for(let n=Math.floor(n0/step)*step;n<=n1;n+=step){
+    const c=[];for(let i=0;i<=S;i++)c.push(fromUTM(e0+(e1-e0)*i/S,n,zone));
+    fs.push({type:'Feature',properties:{m:n%100000===0?1:0},geometry:{type:'LineString',coordinates:c}});
+  }
+  src.setData(JSON.parse(JSON.stringify({type:'FeatureCollection',features:fs})));
+}
+function fmtMGRS(lng,lat){
+  const s=mgrs.forward([lng,lat],5),m=s.match(/^(\d{1,2}[A-Z])([A-Z]{2})(\d{5})(\d{5})$/);
+  return m?`${m[1]} ${m[2]} ${m[3]} ${m[4]}`:s;
+}
+const ex=()=>+$('ex').value;
+const elev=ll=>{try{const v=map.queryTerrainElevation(ll);return(v==null||isNaN(v))?null:v/ex()}catch(e){return null}};
+
+map.on('mousemove',e=>{
+  const{lng,lat}=e.lngLat,h=elev(e.lngLat);
+  $('readout').innerHTML=`<b>${fmtMGRS(lng,lat)}</b><br>${lat.toFixed(5)}, ${lng.toFixed(5)}${h!=null?` · ${Math.round(h)} m / ${Math.round(h*3.281)} ft`:''}`;
+});
+map.on('load',drawGrid);map.on('moveend',drawGrid);
+$('gridT').onchange=drawGrid;
+$('ex').oninput=()=>{map.setTerrain({source:'dem',exaggeration:ex()});map.once('idle',()=>update())};
+$('base').onchange=e=>map.getSource('base').setTiles(BASES[e.target.value]);
+
+/* ---------- Waypoints & route ---------- */
+let wps=[];
+function hav(a,b){const R=6371008.8,dLa=rad(b[1]-a[1]),dLo=rad(b[0]-a[0]);
+  const x=Math.sin(dLa/2)**2+Math.cos(rad(a[1]))*Math.cos(rad(b[1]))*Math.sin(dLo/2)**2;return 2*R*Math.asin(Math.sqrt(x))}
+function addWP(lng,lat){
+  const el=document.createElement('div');el.className='pin';
+  const mk=new maplibregl.Marker({element:el,draggable:true}).setLngLat([lng,lat]).addTo(map);
+  mk.on('dragend',update);
+  el.addEventListener('click',ev=>ev.stopPropagation());
+  el.addEventListener('dblclick',ev=>{ev.stopPropagation();mk.remove();wps=wps.filter(w=>w!==mk);update()});
+  wps.push(mk);update();
+}
+map.on('click',e=>addWP(e.lngLat.lng,e.lngLat.lat));
+let prof=[];
+let retries=0;
+function update(user){
+  if(user!==false)retries=0;
+  wps.forEach((m,i)=>m.getElement().textContent=i+1);
+  const pts=wps.map(m=>m.getLngLat().toArray());
+  map.getSource('route').setData(pts.length>1?{type:'Feature',geometry:{type:'LineString',coordinates:pts}}:E0());
+  $('wps').innerHTML=pts.map((p,i)=>{const h=elev(new maplibregl.LngLat(p[0],p[1]));
+    return`<li data-i="${i}"><span>${i+1}</span><span>${fmtMGRS(p[0],p[1])}</span><span style="margin-left:auto;color:var(--dim)">${h!=null?Math.round(h)+' m':''}</span></li>`}).join('');
+  prof=[];let d=0,g=0,l=0,t=0,miss=false;const pace=+$('pace').value;
+  for(let i=0;i<pts.length-1;i++){
+    const a=pts[i],b=pts[i+1],L=hav(a,b),n=Math.max(2,Math.min(200,Math.ceil(L/60)));
+    for(let k=(i?1:0);k<=n;k++){
+      const f=k/n,p=[a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f];
+      let h=elev(new maplibregl.LngLat(p[0],p[1]));if(h==null){miss=true;h=prof.length?prof[prof.length-1].h:0}
+      prof.push({d:d+L*f,h,p});
+    }
+    d+=L;
+  }
+  const sm=prof.map((q,i)=>({...q,h:(prof[Math.max(0,i-1)].h+q.h+prof[Math.min(prof.length-1,i+1)].h)/3}));
+  for(let i=1;i<sm.length;i++){
+    const dz=sm[i].h-sm[i-1].h,dx=sm[i].d-sm[i-1].d;if(dx<=0)continue;
+    if(dz>0)g+=dz;else l-=dz;
+    t+=dx/1000/(6*Math.exp(-3.5*Math.abs(dz/dx+.05)))*pace;
+  }
+  $('sD').textContent=(d/1000).toFixed(2)+' km';
+  $('sG').textContent=Math.round(g)+' m';$('sL').textContent=Math.round(l)+' m';
+  $('sT').textContent=Math.floor(t)+' h '+String(Math.round((t%1)*60)).padStart(2,'0')+' m';
+  drawProfile(sm);
+  if(miss&&retries++<4)map.once('idle',()=>update(false));
+}
+function drawProfile(s){
+  const c=$('prof'),r=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=w*r;c.height=h*r;
+  const x=c.getContext('2d');x.scale(r,r);x.clearRect(0,0,w,h);
+  if(s.length<2)return;
+  const hs=s.map(q=>q.h),lo=Math.min(...hs),hi=Math.max(...hs),D=s[s.length-1].d,pad=14,rng=Math.max(hi-lo,10);
+  const X=d=>pad+(w-2*pad)*d/D,Y=v=>h-pad-(h-2*pad)*(v-lo)/rng;
+  x.beginPath();x.moveTo(X(0),h-pad);s.forEach(q=>x.lineTo(X(q.d),Y(q.h)));x.lineTo(X(D),h-pad);x.closePath();
+  x.fillStyle='rgba(242,163,58,.25)';x.fill();
+  x.beginPath();s.forEach((q,i)=>i?x.lineTo(X(q.d),Y(q.h)):x.moveTo(X(q.d),Y(q.h)));
+  x.strokeStyle='#f2a33a';x.lineWidth=1.5;x.stroke();
+  x.fillStyle='#93a198';x.font='10px ui-monospace,monospace';
+  x.fillText(Math.round(hi)+' m',4,10);x.fillText(Math.round(lo)+' m',4,h-3);
+}
+$('wps').onclick=e=>{const li=e.target.closest('li');if(li){map.flyTo({center:wps[li.dataset.i].getLngLat(),zoom:Math.max(map.getZoom(),13)})}};
+$('undo').onclick=()=>{const m=wps.pop();if(m)m.remove();update()};
+$('clear').onclick=()=>{wps.forEach(m=>m.remove());wps=[];update()};
+$('pace').onchange=update;
+
+/* ---------- MGRS entry ---------- */
+function parseGoto(){
+  const v=$('goto').value.replace(/\s+/g,'').toUpperCase();
+  try{return mgrs.toPoint(v)}catch(e){$('goto').style.borderColor='#ff3b30';return null}
+}
+$('go').onclick=()=>{$('goto').style.borderColor='';const p=parseGoto();if(p)map.flyTo({center:p,zoom:14,pitch:65})};
+$('add').onclick=()=>{$('goto').style.borderColor='';const p=parseGoto();if(p){addWP(p[0],p[1]);map.flyTo({center:p,zoom:Math.max(map.getZoom(),13)})}};
+$('goto').onkeydown=e=>{if(e.key==='Enter')$('go').click()};
+
+/* ---------- GPX export ---------- */
+$('gpx').onclick=()=>{
+  if(!wps.length)return;
+  const pts=wps.map(m=>m.getLngLat());
+  let g=`<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Idaho 3D MGRS Planner" xmlns="http://www.topografix.com/GPX/1/1">\n`;
+  pts.forEach((p,i)=>{const h=elev(p);g+=`<wpt lat="${p.lat.toFixed(6)}" lon="${p.lng.toFixed(6)}">${h!=null?`<ele>${h.toFixed(1)}</ele>`:''}<name>WP${i+1} ${fmtMGRS(p.lng,p.lat)}</name></wpt>\n`});
+  g+='<trk><name>Route</name><trkseg>\n';
+  (prof.length?prof.map(q=>({lng:q.p[0],lat:q.p[1],h:q.h})):pts.map(p=>({lng:p.lng,lat:p.lat,h:0}))).forEach(q=>g+=`<trkpt lat="${q.lat.toFixed(6)}" lon="${q.lng.toFixed(6)}"><ele>${q.h.toFixed(1)}</ele></trkpt>\n`);
+  g+='</trkseg></trk>\n</gpx>';
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([g],{type:'application/gpx+xml'}));a.download='route.gpx';a.click();
+};
+addEventListener('resize',()=>update());
+/* error banner */
+const eb=document.createElement('div');eb.style.cssText='position:absolute;z-index:5;right:8px;bottom:30px;max-width:340px;background:#5a1410;color:#fff;font:12px monospace;padding:6px 8px;border-radius:6px;display:none';document.body.appendChild(eb);
+const showErr=m=>{eb.style.display='block';eb.textContent=String(m).slice(0,200)};
+addEventListener('error',e=>showErr(e.message));
+map.on('error',e=>{const m=(e.error&&e.error.message)||'map error';if(!/Failed to fetch|NetworkError|404/.test(m))showErr(m)});
+</script>
+</body>
+</html>
