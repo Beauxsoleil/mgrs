@@ -109,11 +109,12 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
     <div id="garminStatus" class="hint" role="status">Live Garmin Bluetooth integration is not available in this browser.</div>
   </div>
   <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
-    <label>Print map — 1:50,000 (US Letter landscape)</label>
-    <div class="row"><select id="printMode" aria-label="Print crop mode"><option value="route">Route and waypoints</option><option value="selection">Selected rectangle</option><option value="view">Current map view</option></select><button id="printSelect">Select area</button></div>
+    <label>Print map (US Letter landscape)</label>
+    <div class="row"><select id="printMode" aria-label="Print crop mode"><option value="route">Route and waypoints</option><option value="selection">Selected rectangle</option><option value="view" selected>Current map view</option></select><button id="printSelect">Select area</button></div>
+    <div class="row"><select id="printScale" aria-label="Print scale"><option value="fit">Fit area to one sheet</option><option value="25000">1:25,000</option><option value="50000">1:50,000</option><option value="100000">1:100,000</option></select></div>
     <div class="row"><label style="align-self:center;margin:0">Declination override (° E+, W−)</label><input id="printDecl" type="number" step="0.01" placeholder="Auto (NOAA)" style="width:95px"></div>
-    <div class="row"><button id="printExport" class="p">Export 1:50,000 print map</button></div>
-    <div id="printStatus" class="hint" role="status">Print at 100% / Actual size. NOAA WMM2025 calculated offline automatically. Optional manual override.</div>
+    <div class="row"><button id="printExport" class="p">Preview printable map</button></div>
+    <div id="printStatus" class="hint" role="status">Print the current map without adding waypoints. Preview first, then Print / Save as PDF. Use 100% / Actual size.</div>
   </div>
   <div class="row" style="margin-top:8px"><button id="undo">Undo</button><button id="clear">Clear</button><button id="gpx" class="p">Export GPX</button></div>
   <p class="hint">Click the map to add waypoints. Drag a pin to move it, double-click to delete. Right-drag or Ctrl-drag to tilt and rotate. Auto-route finds the fastest path between waypoints using Tobler’s hiking function and avoids slopes above your limit. It reads slope only, so it does not yet avoid lakes or rivers.</p>
