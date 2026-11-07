@@ -1,4 +1,4 @@
-const SHELL='shell-v5',TILES='tiles-v1';
+const SHELL='shell-v6',TILES='tiles-v1';
 const ASSETS=['./','index.html','maplibre-gl.js','maplibre-gl.css','mgrs.js','wmm2025.js','print-export.js','print-legend.js','field-ui.css','field-ui.js','manifest.webmanifest'];
 const isTile=u=>/basemap\.nationalmap\.gov|tile\.openstreetmap\.org|elevation-tiles-prod/.test(u.hostname+u.pathname);
 self.addEventListener('install',e=>{e.waitUntil(caches.open(SHELL).then(c=>c.addAll(ASSETS)).then(()=>self.skipWaiting()))});
@@ -17,3 +17,4 @@ self.addEventListener('fetch',e=>{
       .catch(()=>caches.match(req,{ignoreSearch:true}).then(r=>r||caches.match('index.html'))));
   }
 });
+
