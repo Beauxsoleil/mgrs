@@ -38,6 +38,7 @@ label{color:var(--dim);font-size:12px;display:block;margin:2px 0 4px}
 #stats small{display:block;color:var(--dim);font-size:11px}
 #stats strong{font-size:15px}
 canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);border-radius:6px;display:block}
+#roadOptions a{color:var(--acc)}
 .hint{color:var(--dim);font-size:12px;margin:8px 0 0}
 .pin{width:24px;height:24px;border-radius:50%;background:var(--acc);color:#1a1205;font:700 12px/24px system-ui;text-align:center;border:2px solid #1a1205;cursor:grab}
 .gl{font:600 11px ui-monospace,Menlo,monospace;color:#ffd9d4;text-shadow:0 0 3px #000,0 0 3px #000,0 0 2px #000;pointer-events:none;white-space:nowrap}
@@ -64,6 +65,9 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
   <div id="readout" class="mono" title="Tap to copy the grid reference">Tap the map to read a grid reference</div>
   <label for="goto">Go to MGRS (e.g. 11T NJ 12345 67890)</label>
   <div class="row"><input id="goto" type="text" placeholder="MGRS grid reference" autocomplete="off"><button id="go">Go</button><button id="add">+ WP</button></div>
+  <label for="routeMode">Route mode</label>
+  <div class="row"><select id="routeMode"><option value="terrain">Terrain / cross-country</option><option value="foot">Roads & paths · Walk / Ruck</option><option value="car">Roads · Drive</option></select></div>
+  <div id="roadOptions" hidden><div class="row"><button id="roadCalculate" class="p">Calculate road route</button><button id="roadCancel" disabled>Cancel</button></div><p class="hint">Online routing sends your waypoints to FOSSGIS. Roads/paths follow OpenStreetMap access data; slope and water settings apply only to terrain routing. Driving estimates exclude live traffic; walking estimates exclude terrain and pack effects beyond your pace setting. Check access and closures.</p><p class="hint">Routing: <a href="https://routing.openstreetmap.de/about.html" target="_blank" rel="noopener">FOSSGIS / OSRM</a> · © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a> · <a href="https://www.openstreetmap.org/fixthemap" target="_blank" rel="noopener">Fix the map</a></p></div>
   <div class="row"><button id="atX" style="flex:1">Add waypoint at crosshair</button></div>
   <div class="row">
     <select id="base" aria-label="Basemap"><option value="topo">USGS Topo</option><option value="imagery">USGS Imagery</option><option value="osm">OpenStreetMap</option></select>
@@ -117,15 +121,16 @@ canvas{width:100%;height:110px;background:#0d1612;border:1px solid var(--line);b
     <div id="printStatus" class="hint" role="status">Print the current map without adding waypoints. Preview first, then Print / Save as PDF. Use 100% / Actual size.</div>
   </div>
   <div class="row" style="margin-top:8px"><button id="undo">Undo</button><button id="clear">Clear</button><button id="gpx" class="p">Export GPX</button></div>
-  <p class="hint">Click the map to add waypoints. Drag a pin to move it, double-click to delete. Right-drag or Ctrl-drag to tilt and rotate. Auto-route finds the fastest path between waypoints using Tobler’s hiking function and avoids slopes above your limit. It reads slope only, so it does not yet avoid lakes or rivers.</p>
+  <p class="hint">Click the map to add waypoints. Drag a pin to move it, double-click to delete. Right-drag or Ctrl-drag to tilt and rotate. Choose Terrain for cross-country planning or Walk / Ruck and Drive for online road routing. Terrain routing uses slope and water settings; road routing uses mapped roads and access restrictions.</p>
 </div>
 
 <script src="maplibre-gl.js"></script>
 <script src="mgrs.js"></script>
+<script src="road-routing.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const SET=(()=>{try{return JSON.parse(localStorage.getItem('mgrs-set'))||{}}catch(e){return{}}})();
-['base','ex','pace','auto','maxs','gridT','wm','fl','wShow'].forEach(id=>{if(SET[id]!==undefined){const el=$(id);if(el.type==='checkbox')el.checked=SET[id];else el.value=SET[id]}});
+['base','ex','pace','auto','maxs','gridT','wm','fl','wShow','routeMode'].forEach(id=>{if(SET[id]!==undefined){const el=$(id);if(el.type==='checkbox')el.checked=SET[id];else el.value=SET[id]}});
 let SV=null;try{SV=JSON.parse(localStorage.getItem('mgrs-view'))}catch(e){}
 const BASES={
   topo:['https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}'],
@@ -262,7 +267,7 @@ function applyPad(){
 function updatePt(){$('pt').textContent='Close tools ×'}
 $('pt').onclick=()=>{$('panel').classList.toggle('collapsed');applyPad();updatePt()};
 map.on('moveend',()=>{updateHud();try{localStorage.setItem('mgrs-view',JSON.stringify({c:map.getCenter().toArray(),z:map.getZoom(),p:map.getPitch(),b:map.getBearing()}))}catch(e){}});
-function saveSet(){try{const o={};['base','ex','pace','auto','maxs','gridT','wm','fl','wShow'].forEach(id=>{const el=$(id);o[id]=el.type==='checkbox'?el.checked:el.value});localStorage.setItem('mgrs-set',JSON.stringify(o))}catch(e){}}
+function saveSet(){try{const o={};['base','ex','pace','auto','maxs','gridT','wm','fl','wShow','routeMode'].forEach(id=>{const el=$(id);o[id]=el.type==='checkbox'?el.checked:el.value});localStorage.setItem('mgrs-set',JSON.stringify(o))}catch(e){}}
 document.querySelectorAll('#panel select,#panel input').forEach(el=>el.addEventListener('change',saveSet));
 
 /* MGRS grid labels (DOM markers so they follow the terrain) */
@@ -310,6 +315,45 @@ $('base').onchange=e=>map.getSource('base').setTiles(BASES[e.target.value]);
 
 /* ---------- Waypoints & route ---------- */
 let wps=[],legs=[],legX=[],token=0,retries=0,prof=[],tool=null,losPts=[];
+let roadResult=null,roadController=null,roadBusy=false;
+const requestRoad=RoadRouting.createClient((...args)=>fetch(...args));
+const isRoad=()=>['foot','car'].includes($('routeMode').value);
+function routeExportError(){return isRoad()&&wps.length>1&&!roadResult?(roadBusy?'Road route is calculating. Please wait.':'Calculate a road route before exporting.') : '';}
+function syncRouteControls(){
+ const road=isRoad();$('roadOptions').hidden=!road;
+ ['auto','maxs','wm','fl'].forEach(id=>$(id).disabled=road);
+ $('pace').disabled=$('routeMode').value==='car';$('prof').hidden=road;
+ $('roadCalculate').disabled=roadBusy;$('roadCancel').disabled=!roadBusy;
+}
+function cancelRoad(){if(roadController)roadController.abort();roadController=null;roadBusy=false;}
+function updateRoad(){
+ prof=[];
+ if(roadResult){let d=0;prof=roadResult.coordinates.map((p,i)=>{if(i)d+=hav(roadResult.coordinates[i-1],p);return{p,h:0,d}});}
+ map.getSource('route').setData(prof.length>1?{type:'Feature',properties:{},geometry:{type:'LineString',coordinates:prof.map(q=>q.p)}}:E0());
+ $('sD').textContent=roadResult?(roadResult.distance/1000).toFixed(2)+' km':'—';
+ const mins=roadResult?Math.round(roadResult.duration/60*($('routeMode').value==='foot'?+$('pace').value:1)):0;
+ $('sT').textContent=roadResult?Math.floor(mins/60)+' h '+String(mins%60).padStart(2,'0')+' m':'—';
+ $('sG').textContent='—';$('sL').textContent='—';updatePt();
+}
+$('routeMode').onchange=()=>{syncRouteControls();changed()};
+$('roadCancel').onclick=()=>{++token;cancelRoad();syncRouteControls();setMsg('Road routing cancelled. Tap Calculate road route to try again.')};
+$('roadCalculate').onclick=async()=>{
+ if(!isRoad()||roadBusy)return;
+ const pts=wps.map(m=>m.getLngLat().toArray()),mode=$('routeMode').value;
+ try{RoadRouting.urlFor(mode,pts)}catch(e){setMsg(e.message);return}
+ const my=++token;cancelRoad();roadResult=null;roadBusy=true;
+ const controller=new AbortController();roadController=controller;syncRouteControls();update();
+ setMsg('Routing leg 1 of 1… calculating '+(mode==='car'?'driving':'walking')+' route.');
+ const timer=setTimeout(()=>controller.abort(),25000);
+ try{
+  const result=await requestRoad(mode,pts,controller.signal);if(my!==token)return;
+  roadResult=result;update();
+  const snap=result.snaps.map((d,i)=>d>10?`WP${i+1}: ${d} m`:null).filter(Boolean);
+  setMsg((mode==='car'?'Driving':'Walking / rucking')+' road route ready.'+(snap.length?' Road/path offsets from your pins: '+snap.join(', ')+'. Distances exclude these offsets.':''));
+ }catch(e){if(my===token)setMsg(e.name==='AbortError'?'Road routing timed out. Check your connection and calculate again.':e.message);}
+ finally{clearTimeout(timer);if(my===token){roadController=null;roadBusy=false;syncRouteControls();}}
+};
+syncRouteControls();
 const legCache=new Map();
 function hav(a,b){const R=6371008.8,dLa=rad(b[1]-a[1]),dLo=rad(b[0]-a[0]);
   const x=Math.sin(dLa/2)**2+Math.cos(rad(a[1]))*Math.cos(rad(b[1]))*Math.sin(dLo/2)**2;return 2*R*Math.asin(Math.sqrt(x))}
@@ -567,6 +611,8 @@ async function routeLeg(a,b,maxS,stale){
 }
 async function computeLegs(){
   const my=++token,n=Math.max(0,wps.length-1);
+  cancelRoad();roadResult=null;syncRouteControls();
+  if(isRoad()){legs=[];legX=[];update();renderCrossings();setMsg(n?'Tap Calculate road route to follow roads between these waypoints.':'Add at least two waypoints, then calculate a road route.');return;}
   legs=new Array(n).fill(null);legX=new Array(n).fill(null);setMsg('');update();renderCrossings();
   if(!$('auto').checked||!n)return;
   const pts=wps.map(m=>m.getLngLat().toArray()),ms=+$('maxs').value,notes=[],stale=()=>my!==token;
@@ -706,6 +752,7 @@ function update(user){
   const pts=wps.map(m=>m.getLngLat().toArray());
   $('wps').innerHTML=pts.map((p,i)=>{const h=elev(new maplibregl.LngLat(p[0],p[1]));
     return`<li data-i="${i}"><span>${i+1}</span><span>${fmtMGRS(p[0],p[1])}</span><span style="margin-left:auto;color:var(--dim)">${h!=null?Math.round(h)+' m':''}</span><button data-del="${i}" aria-label="Delete waypoint ${i+1}" style="padding:0 10px;min-height:28px">×</button></li>`}).join('');
+  if(isRoad()){updateRoad();return;}
   prof=[];let d=0,g=0,l=0,t=0,miss=false;const pace=+$('pace').value;
   for(let i=0;i<pts.length-1;i++){
     const a=pts[i],b=pts[i+1],leg=legs[i];
@@ -854,4 +901,5 @@ map.on('error',e=>{const m=(e.error&&e.error.message)||'map error';if(!/Failed t
 <script src="field-ui.js"></script>
 </body>
 </html>
+
 

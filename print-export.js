@@ -18,7 +18,9 @@ function getBounds(){
  if($('printMode').value==='view'){
   const b=map.getBounds();return [[b.getWest(),b.getSouth()],[b.getEast(),b.getNorth()]];
  }
+ if(typeof routeExportError==='function'&&routeExportError())throw Error(routeExportError());
  const pts=wps.map(p=>p.getLngLat().toArray());
+ for(const q of prof)pts.push(q.p);
  for(const leg of legs)if(leg)for(const q of leg)if(q.p)pts.push(q.p);
  if(!pts.length)throw Error('No route yet. Choose Current map view to print without waypoints.');
  return bounds(pts);
@@ -117,8 +119,9 @@ $('printExport').onclick=async()=>{
  try{
   const {image,gridNote}=await render(L,snapshot,controller.signal);if(controller.signal.aborted)return;
   const declination=Number.isFinite(snapshot.declination)?`Magnetic declination ${Math.abs(snapshot.declination).toFixed(2)}° ${snapshot.declination>=0?'E':'W'}`:'Magnetic declination unavailable';
+  const routeCredit=typeof isRoad==='function'&&isRoad()&&roadResult?' · Routing: FOSSGIS / OSRM · © OpenStreetMap contributors':'';
   const scaleText='1:'+L.scale.toLocaleString(),stamp=snapshot.date,credit=snapshot.base==='osm'?'© OpenStreetMap contributors':'USGS National Map';
-  $('printContent').innerHTML=`<header><h2>MGRS FIELD MAP · ${scaleText}</h2><span>${stamp}</span></header><img class="print-map" alt="North-up map with route, waypoints, metric and mile bar scales, and true/grid/magnetic north declination diagram" src="${image}"><div class="print-meta"><b>${scaleText} at sheet center, 100% print size.</b> ${escape(gridNote)} · ${escape(credit)}<br>Center: ${escape(fmtMGRS(...L.center))} · ${escape(declination)}<br>Route and numbered waypoints included. Terrain and visibility overlays are omitted. Verify scale: the line below must measure 50 mm.<div class="calibration"></div></div>`;
+  $('printContent').innerHTML=`<header><h2>MGRS FIELD MAP · ${scaleText}</h2><span>${stamp}</span></header><img class="print-map" alt="North-up map with route, waypoints, metric and mile bar scales, and true/grid/magnetic north declination diagram" src="${image}"><div class="print-meta"><b>${scaleText} at sheet center, 100% print size.</b> ${escape(gridNote)} · ${escape(credit+routeCredit)}<br>Center: ${escape(fmtMGRS(...L.center))} · ${escape(declination)}<br>Route and numbered waypoints included. Terrain and visibility overlays are omitted. Verify scale: the line below must measure 50 mm.<div class="calibration"></div></div>`;
   const img=preview.querySelector('.print-map');if(img.decode)await img.decode();if(controller.signal.aborted)return;
   $('printNow').disabled=false;$('printNow').onclick=()=>window.print();
   const download=document.createElement('a');download.textContent='Save map image';download.href=image;download.download=`mgrs-map-${stamp}.png`;preview.querySelector('.print-toolbar').append(download);
@@ -127,3 +130,4 @@ $('printExport').onclick=async()=>{
  finally{job=null;$('printExport').disabled=false;}
 };
 })();
+
