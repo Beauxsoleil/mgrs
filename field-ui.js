@@ -24,6 +24,7 @@ const esc=s=>String(s).replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'
 function makeFile(){
  const gps=$('exportSource').value==='gps',name=$('exportName').value.trim()||'Field route';
  if(gps&&!gpsTrack.length)throw Error('No recorded track yet. Start GPS and enable Record track first.');
+ if(!gps&&typeof routeExportError==='function'&&routeExportError())throw Error(routeExportError());
  if(!gps&&!wps.length)throw Error('Add at least one waypoint before exporting your route.');
  if(!gps&&$('msg').textContent.startsWith('Routing leg'))throw Error('Your route is still calculating. Wait for it to finish, then export.');
  const waypoints=gps?[]:wps.map((m,i)=>{const p=m.getLngLat();return{lon:p.lng,lat:p.lat,ele:elev(p),name:`WP${i+1} ${fmtMGRS(p.lng,p.lat)}`}});
@@ -47,3 +48,4 @@ $('downloadExport').onclick=()=>deliver(false);$('shareExport').onclick=()=>deli
 $('clear').onclick=()=>{if(wps.length&&confirm('Clear all planned waypoints?')){wps.forEach(m=>m.remove());wps=[];changed();}};
 $('printSelect').addEventListener('click',()=>{if(!window.mgrsPrintSelecting)return;setPanel(false);$('hud').hidden=false;$('infoToggle').setAttribute('aria-pressed','true');});
 })();
+
