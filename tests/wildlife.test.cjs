@@ -99,3 +99,51 @@ assert(at(R,40,60)<at(R,80,60),'rifle: private beats public');assert(Math.abs(at
 assert(W.roadsQuery([-114.5,42.5],[-114.4,42.6]).includes('(42.50000,-114.50000,42.60000,-114.40000)'));
 assert(W.padusUrl([-114.5,42.5],[-114.4,42.6],true).includes('f=geojson')&&W.padusUrl([-114.5,42.5],[-114.4,42.6],false).includes('1%3D1'));
 console.log('PASS: road raster + distance, polygon fill with holes, rifle/archery road effect, access effect, query builders');
+
+// ---- Disclaimer wording (panel HTML, read from the source file) ----
+const fs=require('node:fs'),path=require('node:path');
+const src=fs.readFileSync(path.join(__dirname,'../wildlife.js'),'utf8');
+assert(src.includes('This is a terrain-plus-conditions heuristic, not live animal tracking. Predictions may incorporate terrain, weather, road proximity, public-land access, and estimated hunting pressure when data is available. The model does not directly observe animals, vegetation, water availability, or actual hunting activity. Results are estimates for scouting and planning, not confirmed animal locations.'),'disclaimer wording');
+assert(!src.includes('It does not see vegetation, roads, water, hunting pressure'),'old disclaimer wording must be gone');
+assert(src.includes('Open-Meteo.com'),'Open-Meteo attribution preserved');
+console.log('PASS: disclaimer wording, old wording removed, Open-Meteo attribution kept');
+
+// ---- Road timeout, cache reuse, unavailable roads, IDFG auth errors ----
+assert(W.ROAD_TIMEOUT_MS>=8000&&W.ROAD_TIMEOUT_MS<=10000,'road timeout 8-10 s: '+W.ROAD_TIMEOUT_MS);
+assert(W.roadsQuery([-114.5,42.5],[-114.4,42.6]).startsWith('[out:json][timeout:8];'),'server-side query timeout matches the client timeout');
+// Cache key: same box (within rounding) reuses, a moved box does not.
+assert.equal(W.roadCacheKey([-114.46,42.56],[-114.36,42.66]),W.roadCacheKey([-114.46004,42.56004],[-114.36004,42.66004]));
+assert.notEqual(W.roadCacheKey([-114.46,42.56],[-114.36,42.66]),W.roadCacheKey([-114.40,42.56],[-114.30,42.66]));
+// Bounded cache with expiry: TTL evicts stale entries, max size evicts the least-recently-used.
+let clock=0;
+const rc=W.createRoadCache({max:2,ttlMs:1000,now:()=>clock});
+rc.set('a',[1]);rc.set('b',[2]);assert.equal(rc.size,2);
+clock=500;assert.deepEqual(rc.get('a'),[1]); // fresh hit refreshes recency
+rc.set('c',[3]);assert.equal(rc.size,2);assert.equal(rc.get('b'),undefined); // 'b' evicted as least-recently used
+clock=2000;assert.equal(rc.get('a'),undefined); // expired
+// Unavailable roads: exact display text, and the model must run with no road data at all.
+assert(W.roadUnavailableText('timed out').startsWith('Road data unavailable — prediction excludes road proximity.'));
+assert.equal(W.roadUnavailableText(),'Road data unavailable — prediction excludes road proximity.');
+const noRoads=W.compute(flat,{species:'elk',season:'early',time:'dusk',wx:'mild',roadDist:null});
+assert(noRoads.rgba.length===N*N*4,'prediction runs with roadDist null');
+// IDFG auth classification: ArcGIS 499/498, HTTP 401/403, token wording; other failures are not auth.
+assert.equal(W.classifyIdfgResponse({error:{code:499,message:'Token Required'}}),'auth');
+assert.equal(W.classifyIdfgResponse({error:{code:498,message:'Token Expired'}}),'auth');
+assert.equal(W.classifyIdfgResponse({error:{code:500,message:'Internal error'}}),'error');
+assert.equal(W.classifyIdfgResponse({layers:[]}),'ok');
+assert(W.isAuthError({status:401,message:'service returned 401'}));
+assert(W.isAuthError({status:403,message:'Forbidden'}));
+assert(!W.isAuthError(new Error('timed out')));
+assert(!W.isAuthError({code:400,message:'Invalid f parameter'}));
+assert.match(W.idfgUnavailableText('auth'),/requires an IDFG token/);
+assert.match(W.idfgUnavailableText('error','timed out'),/timed out/);
+console.log('PASS: road timeout + cache key, bounded cache with TTL/LRU, unavailable-road text and null-roadDist compute, IDFG auth classification');
+
+// ---- Road fetch timeout (async): slow requests are cut off, fast ones resolve ----
+(async()=>{
+  let aborted=false;
+  await assert.rejects(W.timedFetch(sig=>{sig.addEventListener('abort',()=>{aborted=true});return new Promise(()=>{});},30),/timed out/);
+  assert(aborted,'timeout aborts the request');
+  assert.equal(await W.timedFetch(()=>Promise.resolve('ok'),1000),'ok');
+  console.log('PASS: road fetch timeout aborts slow requests, fast requests resolve');
+})().catch(e=>{console.error(e);process.exitCode=1});
