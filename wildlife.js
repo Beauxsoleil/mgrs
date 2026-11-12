@@ -1,7 +1,8 @@
 /* Deer & elk movement model.
-   Terrain-only heuristic (slope, aspect, elevation band, benches, saddles, drainages)
-   shifted by species, season, weather and time of day. No vegetation, roads, pressure
-   or live animal data. Scouting aid only. */
+   Terrain-plus-conditions heuristic (slope, aspect, elevation band, benches, saddles, drainages)
+   shifted by species, season, weather, time of day, and — when data is available — road
+   proximity, public-land access and estimated hunting pressure. No live animal data.
+   Scouting aid only: estimates, not confirmed animal locations. */
 (function (root) {
 'use strict';
 const rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
@@ -212,6 +213,21 @@ function pickLayers(layers, wanted) {
   return (layers || []).filter(l => wanted.some(w => re[w].test(l.name || ''))).map(l => ({ id: l.id, name: l.name }));
 }
 const idfgTiles = (svc, ids) => IDFG_BASE + svc + '/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=256,256&format=png32&transparent=true&f=image&layers=show:' + ids.join(',');
+// ArcGIS auth failures: code 499 (Token Required) / 498 (Token Expired), HTTP 401/403,
+// or an error message naming a token or authorization. Anything else is a plain failure.
+function isAuthError(e) {
+  if (!e) return false;
+  if (e.code === 498 || e.code === 499 || e.status === 401 || e.status === 403) return true;
+  return /token|unauthori[sz]ed|forbidden|not authorized|access denied/i.test(e.message || (typeof e === 'string' ? e : ''));
+}
+// Classify an ArcGIS ?f=json body: 'ok' | 'auth' | 'error'.
+function classifyIdfgResponse(info) {
+  if (!info || !info.error) return 'ok';
+  return isAuthError(info.error) ? 'auth' : 'error';
+}
+const idfgUnavailableText = (kind, detail) => kind === 'auth'
+  ? 'IDFG layer unavailable: this service requires an IDFG token and is not publicly accessible. Predictions continue without it.'
+  : 'IDFG layer unavailable (' + (detail || 'service error') + '). Predictions continue without it.';
 
 /* ---------- Roads and public land rasters ---------- */
 // Rasterize polylines (arrays of [x,y] in cell coordinates) into a W*H mask.
@@ -263,12 +279,41 @@ function chamfer(mask, W, H, cs) {
   return d;
 }
 // Overpass query: roads a vehicle could plausibly use (OSM carries few seasonal closures).
-const roadsQuery = (lo, hi) => '[out:json][timeout:25];way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track)$"]["motor_vehicle"!~"^(no|private)$"]["access"!~"^(no|private)$"](' + [lo[1], lo[0], hi[1], hi[0]].map(v => v.toFixed(5)).join(',') + ');out geom;';
+// The server-side [timeout:8] matches the 9 s client timeout below, so a slow area fails fast.
+const roadsQuery = (lo, hi) => '[out:json][timeout:8];way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track)$"]["motor_vehicle"!~"^(no|private)$"]["access"!~"^(no|private)$"](' + [lo[1], lo[0], hi[1], hi[0]].map(v => v.toFixed(5)).join(',') + ');out geom;';
 const PADUS = 'https://services.arcgis.com/v01gqwM5QqNysAAi/ArcGIS/rest/services/PADUS_Protected_Areas_National/FeatureServer/0/query';
 const padusUrl = (lo, hi, filtered) => PADUS + '?where=' + encodeURIComponent(filtered ? "Pub_Access='OA'" : '1=1') + '&geometry=' + [lo[0], lo[1], hi[0], hi[1]].join(',') +
   '&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=Pub_Access,Mang_Type&returnGeometry=true&outSR=4326&maxAllowableOffset=0.0002&resultRecordCount=2000&f=geojson';
 
-const api = { compute, rasterizeLines, fillPolygons, chamfer, roadsQuery, padusUrl, HUNT, idfgWanted, pickLayers, idfgTiles, boxBlur, sunTimes, moonPhase, timeClass, conditionsAt, liveOptions, SPECIES, SEASON, TIME, NOTES, COLORS };
+/* ---------- Road data: timeout, bounded cache, failure text ---------- */
+// Overpass can take ~45 s or hang from some networks; cap the wait so a prediction never stalls on roads.
+const ROAD_TIMEOUT_MS = 9000, ROAD_CACHE_TTL_MS = 24 * 3600000, ROAD_CACHE_MAX = 8;
+// Cache key: the prediction box rounded to ~10 m. Same center and radius reuses the fetch;
+// a moved map center fetches fresh lines so the edges stay covered.
+const roadCacheKey = (lo, hi) => [lo[0], lo[1], hi[0], hi[1]].map(v => v.toFixed(4)).join(',');
+// Bounded in-memory cache with expiry; least-recently-used entry is evicted when full.
+// Only successful fetches are ever stored, so a failure is never remembered as "no roads".
+function createRoadCache(o) {
+  const max = (o && o.max) || ROAD_CACHE_MAX, ttl = (o && o.ttlMs) || ROAD_CACHE_TTL_MS, now = (o && o.now) || Date.now, m = new Map();
+  return {
+    get(k) { const e = m.get(k); if (!e) return undefined; if (now() - e.t > ttl) { m.delete(k); return undefined; } m.delete(k); m.set(k, e); return e.v; },
+    set(k, v) { if (m.has(k)) m.delete(k); m.set(k, { t: now(), v }); while (m.size > max) m.delete(m.keys().next().value); },
+    get size() { return m.size; }
+  };
+}
+// Run fn(signal) with a hard timeout; aborts the signal and rejects with 'timed out'.
+function timedFetch(fn, ms) {
+  const ctl = new AbortController();
+  return new Promise((resolve, reject) => {
+    const to = setTimeout(() => { ctl.abort(); reject(new Error('timed out')); }, ms);
+    fn(ctl.signal).then(v => { clearTimeout(to); resolve(v); }, e => { clearTimeout(to); reject(e); });
+  });
+}
+// Exact text shown when road data could not be loaded. Unavailable data is never treated
+// as evidence that no roads exist: the model simply skips the road effect.
+const roadUnavailableText = reason => 'Road data unavailable — prediction excludes road proximity.' + (reason ? ' (' + reason + ')' : '');
+
+const api = { compute, rasterizeLines, fillPolygons, chamfer, roadsQuery, padusUrl, HUNT, idfgWanted, pickLayers, idfgTiles, isAuthError, classifyIdfgResponse, idfgUnavailableText, ROAD_TIMEOUT_MS, ROAD_CACHE_TTL_MS, ROAD_CACHE_MAX, roadCacheKey, createRoadCache, timedFetch, roadUnavailableText, boxBlur, sunTimes, moonPhase, timeClass, conditionsAt, liveOptions, SPECIES, SEASON, TIME, NOTES, COLORS };
 if (typeof module === 'object' && module.exports) module.exports = api;
 root.Wildlife = api;
 
@@ -299,7 +344,7 @@ panelSec.innerHTML = `<summary>Deer &amp; elk movement</summary><div>
   <div class="row"><button id="wlGo" class="p">Predict at map center</button><button id="wlClr">Clear</button></div>
   <div class="hint" style="margin:6px 0"><b style="color:#8b6bff">&#9632;</b> Bedding &nbsp; <b style="color:#f5e050">&#9632;</b> Feeding &nbsp; <b style="color:#ff6b3d">&#9632;</b> Travel (saddles, benches, drainages)</div>
   <div id="wlMsg" class="hint" role="status" style="white-space:pre-line"></div>
-  <p class="hint">Terrain plus conditions estimate. It does not see vegetation, roads, water, hunting pressure or real animals, so confirm with sign, trail cams and local knowledge. Live weather by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a>. Roads © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>; public land from USGS PAD-US. If it can't load, the manual weather setting is used.</p>
+  <p class="hint">This is a terrain-plus-conditions heuristic, not live animal tracking. Predictions may incorporate terrain, weather, road proximity, public-land access, and estimated hunting pressure when data is available. The model does not directly observe animals, vegetation, water availability, or actual hunting activity. Results are estimates for scouting and planning, not confirmed animal locations. Live weather by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a>. Roads © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>; public land from USGS PAD-US. If it can't load, the manual weather setting is used.</p>
 </div>`;
 const anchor = $('bLos').closest('details') || $('bLos').closest('#panel > div');
 anchor.after(panelSec);
@@ -325,14 +370,29 @@ async function fetchWx(lat, lng) {
   } finally { clearTimeout(to); }
 }
 async function fetchJson(url, opts, ms) {
-  const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), ms || 20000);
   try {
-    const r = await fetch(url, { ...(opts || {}), signal: ctl.signal });
+    const r = await timedFetch(signal => fetch(url, { ...(opts || {}), signal }), ms || 20000);
     if (!r.ok) throw new Error('service returned ' + r.status);
     return await r.json();
-  } catch (err) { throw new Error(err.name === 'AbortError' ? 'timed out' : err.message); } finally { clearTimeout(to); }
+  } catch (err) { throw new Error(err.name === 'AbortError' ? 'timed out' : err.message); }
 }
-const fetchRoads = (lo, hi) => fetchJson('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(roadsQuery(lo, hi)), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, 25000);
+const fetchRoads = (lo, hi) => fetchJson('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(roadsQuery(lo, hi)), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }, ROAD_TIMEOUT_MS);
+const roadCache = createRoadCache({});
+const roadInflight = new Map(); // cache key -> in-flight promise, so one area never fires two requests
+// Road lines for an area: memory cache first, then one shared network request.
+// Only successful fetches are cached; a failure is never stored as "no roads".
+async function getRoads(lo, hi) {
+  const key = roadCacheKey(lo, hi), hit = roadCache.get(key);
+  if (hit) return hit;
+  if (roadInflight.has(key)) return roadInflight.get(key);
+  const p = fetchRoads(lo, hi).then(j => {
+    const lines = (j.elements || []).filter(e => e.geometry && e.geometry.length > 1).map(e => e.geometry.map(p => [p.lon, p.lat]));
+    roadCache.set(key, lines);
+    return lines;
+  });
+  roadInflight.set(key, p);
+  try { return await p; } finally { roadInflight.delete(key); }
+}
 async function fetchAccess(lo, hi) {
   let j = await fetchJson(padusUrl(lo, hi, true), null, 20000);
   if (j.error) j = await fetchJson(padusUrl(lo, hi, false), null, 20000); // field filter rejected: filter client-side
@@ -364,12 +424,12 @@ async function run() {
     let roadDist = null, access = null, roadLines = [];
     if ($('wlHuman').checked) {
       wmsg('Loading roads and public land…');
-      const [rr, aa] = await Promise.allSettled([fetchRoads(lo, hi), fetchAccess(lo, hi)]);
+      const [rr, aa] = await Promise.allSettled([getRoads(lo, hi), fetchAccess(lo, hi)]);
       if (rr.status === 'fulfilled') {
-        roadLines = (rr.value.elements || []).filter(e => e.geometry && e.geometry.length > 1).map(e => e.geometry.map(p => [p.lon, p.lat]));
+        roadLines = rr.value;
         roadDist = chamfer(rasterizeLines(roadLines.map(l => l.map(p => D.px(p[0], p[1]))), D.W, D.H), D.W, D.H, D.cs);
         lines.push(`Roads: ${roadLines.length} OpenStreetMap segments (closures and gates are often missing, so check the unit).`);
-      } else lines.push('Roads unavailable (' + rr.reason.message + '). Skipping the road effect.');
+      } else lines.push(roadUnavailableText(rr.reason.message));
       if (aa.status === 'fulfilled') {
         const feats = (aa.value.features || []).filter(f => !f.properties || f.properties.Pub_Access === 'OA');
         if (feats.length) {
@@ -401,6 +461,7 @@ async function run() {
 }
 const imsg = t => { $('wlIdfgMsg').textContent = t || ''; };
 let idfgToken = 0;
+const idfgAuthBlocked = new Set(); // services that answered "Token Required": don't ask again this session
 function clearIdfg() { if (map.getLayer('idfg')) map.removeLayer('idfg'); if (map.getSource('idfg')) map.removeSource('idfg'); }
 async function updateIdfg() {
   const tok = ++idfgToken, choice = $('wlIdfg').value, sp = $('wlSp').value;
@@ -408,20 +469,23 @@ async function updateIdfg() {
   if (choice === 'off') return;
   const svc = IDFG_SERVICES[sp];
   if (!svc) { imsg('Idaho Fish and Game has no public whitetail range layer that I could find. Pick elk or mule deer.'); return; }
+  if (idfgAuthBlocked.has(svc)) { imsg(idfgUnavailableText('auth')); return; }
   const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 9000);
   try {
     imsg('Loading IDFG layers…');
     const r = await fetch(IDFG_BASE + svc + '/MapServer?f=json', { signal: ctl.signal });
-    if (!r.ok) throw new Error('service returned ' + r.status);
+    if (!r.ok) throw Object.assign(new Error('service returned ' + r.status), { status: r.status });
     const info = await r.json();
-    if (info.error) throw new Error(info.error.message || 'service error'); // ArcGIS returns HTTP 200 with an error body (e.g. "Token Required")
+    const kind = classifyIdfgResponse(info); // ArcGIS returns HTTP 200 with an error body (e.g. "Token Required")
+    if (kind === 'auth') { idfgAuthBlocked.add(svc); throw Object.assign(new Error(info.error.message || 'Token Required'), { code: info.error.code }); }
+    if (kind === 'error') throw new Error(info.error.message || 'service error');
     const picked = pickLayers(info.layers, idfgWanted(choice, $('wlSeason').value));
     if (tok !== idfgToken) return;
     if (!picked.length) { imsg('IDFG has no matching layer for that choice (' + (info.layers || []).map(l => l.name).join(', ') + ').'); return; }
     map.addSource('idfg', { type: 'raster', tiles: [idfgTiles(svc, picked.map(l => l.id))], tileSize: 256, attribution: 'Idaho Fish and Game' });
     map.addLayer({ id: 'idfg', type: 'raster', source: 'idfg', paint: { 'raster-opacity': .6 } }, map.getLayer('wl') ? 'wl' : 'grid');
     imsg('Showing: ' + picked.map(l => l.name).join(', ') + '. Modeled habitat suitability from IDFG GPS collar data, not live animal positions.' + (sp === 'mule' ? ' IDFG labels the mule deer layers preliminary.' : ''));
-  } catch (err) { if (tok === idfgToken) imsg('IDFG layer unavailable (' + (err.name === 'AbortError' ? 'timed out' : err.message) + ').'); }
+  } catch (err) { if (tok === idfgToken) imsg(isAuthError(err) ? idfgUnavailableText('auth') : idfgUnavailableText('error', err.name === 'AbortError' ? 'timed out' : err.message)); }
   finally { clearTimeout(to); }
 }
 $('wlGo').onclick = run; $('wlClr').onclick = () => { clearWL(); };
